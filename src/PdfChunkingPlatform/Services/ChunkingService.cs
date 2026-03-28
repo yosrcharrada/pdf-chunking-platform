@@ -83,7 +83,7 @@ public class ChunkingService : IChunkingService
 
         try
         {
-            var segments = Regex.Split(text.Trim(), pattern)
+            var segments = Regex.Split(text.Trim(), pattern, RegexOptions.None, TimeSpan.FromSeconds(5))
                 .Where(s => !string.IsNullOrWhiteSpace(s))
                 .Select(s => s.Trim())
                 .ToList();
