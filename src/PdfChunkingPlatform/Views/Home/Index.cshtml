@@ -1,0 +1,337 @@
+@model PdfChunkingPlatform.Models.ChunkingViewModel
+@{
+    ViewData["Title"] = "ChunkMaster - PDF Chunking Platform";
+    Layout = null;
+}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@ViewData["Title"]</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: #FFFFFF; color: #000000; min-height: 100vh; }
+        header { background: #1A1A1A; padding: 0 2rem; display: flex; align-items: center; justify-content: space-between; height: 64px; position: sticky; top: 0; z-index: 100; box-shadow: 0 2px 8px rgba(0,0,0,0.4); }
+        .logo { display: flex; align-items: center; gap: 10px; text-decoration: none; }
+        .logo-icon { width: 36px; height: 36px; background: #F5C518; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-weight: 900; font-size: 18px; color: #1A1A1A; }
+        .logo-text { font-size: 1.4rem; font-weight: 700; color: #FFFFFF; letter-spacing: -0.5px; }
+        .logo-text span { color: #F5C518; }
+        .header-badge { background: #F5C518; color: #1A1A1A; font-size: 0.7rem; font-weight: 700; padding: 3px 8px; border-radius: 20px; letter-spacing: 1px; text-transform: uppercase; }
+        .hero { background: linear-gradient(135deg, #1A1A1A 0%, #2D2D2D 50%, #1A1A1A 100%); color: white; padding: 3rem 2rem; text-align: center; }
+        .hero h1 { font-size: 2.5rem; font-weight: 800; margin-bottom: 0.75rem; line-height: 1.2; }
+        .hero h1 span { color: #F5C518; }
+        .hero p { font-size: 1.1rem; color: #CCCCCC; max-width: 600px; margin: 0 auto 1.5rem; }
+        .strategy-badges { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; }
+        .strategy-badge { background: rgba(245,197,24,0.15); border: 1px solid #F5C518; color: #F5C518; padding: 6px 16px; border-radius: 20px; font-size: 0.85rem; font-weight: 600; }
+        .main-container { max-width: 1400px; margin: 0 auto; padding: 2rem; display: grid; grid-template-columns: 380px 1fr; gap: 2rem; align-items: start; }
+        .panel { background: #FFFFFF; border: 1px solid #E0E0E0; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,0.06); }
+        .panel-header { background: #1A1A1A; color: #FFFFFF; padding: 1rem 1.5rem; display: flex; align-items: center; gap: 10px; }
+        .panel-header h2 { font-size: 1rem; font-weight: 600; }
+        .panel-icon { width: 28px; height: 28px; background: #F5C518; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 14px; }
+        .panel-body { padding: 1.5rem; }
+        .form-group { margin-bottom: 1.25rem; }
+        .form-label { display: block; font-size: 0.85rem; font-weight: 600; color: #000000; margin-bottom: 0.4rem; text-transform: uppercase; letter-spacing: 0.5px; }
+        .form-control { width: 100%; padding: 0.6rem 0.9rem; border: 1.5px solid #E0E0E0; border-radius: 8px; font-size: 0.9rem; color: #000000; background: #FFFFFF; transition: border-color 0.2s; outline: none; }
+        .form-control:focus { border-color: #F5C518; box-shadow: 0 0 0 3px rgba(245,197,24,0.15); }
+        .file-drop-zone { border: 2px dashed #E0E0E0; border-radius: 10px; padding: 2rem 1rem; text-align: center; cursor: pointer; transition: all 0.2s; background: #FAFAFA; position: relative; }
+        .file-drop-zone:hover, .file-drop-zone.dragover { border-color: #F5C518; background: rgba(245,197,24,0.04); }
+        .file-drop-zone input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
+        .file-drop-icon { font-size: 2.5rem; margin-bottom: 0.5rem; }
+        .file-drop-text { font-size: 0.9rem; color: #666666; }
+        .file-drop-text strong { color: #F5C518; }
+        .file-names { margin-top: 0.75rem; font-size: 0.8rem; color: #555; }
+        .strategy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .strategy-card { border: 1.5px solid #E0E0E0; border-radius: 8px; padding: 0.75rem; cursor: pointer; transition: all 0.2s; text-align: center; }
+        .strategy-card:hover { border-color: #F5C518; background: rgba(245,197,24,0.04); }
+        .strategy-card.selected { border-color: #F5C518; background: rgba(245,197,24,0.1); }
+        .strategy-card input[type="radio"] { display: none; }
+        .strategy-card-icon { font-size: 1.4rem; margin-bottom: 4px; }
+        .strategy-card-name { font-size: 0.8rem; font-weight: 700; color: #000000; }
+        .strategy-card-desc { font-size: 0.7rem; color: #666666; margin-top: 2px; }
+        .slider-container { display: flex; align-items: center; gap: 12px; }
+        .slider { flex: 1; -webkit-appearance: none; height: 6px; border-radius: 3px; background: #E0E0E0; outline: none; }
+        .slider::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; background: #F5C518; cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,0.2); }
+        .slider-value { min-width: 45px; text-align: right; font-size: 0.85rem; font-weight: 700; color: #000000; }
+        .btn-process { width: 100%; padding: 0.85rem; background: #F5C518; color: #1A1A1A; border: none; border-radius: 10px; font-size: 1rem; font-weight: 700; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 8px; letter-spacing: 0.3px; text-transform: uppercase; }
+        .btn-process:hover { background: #E6B800; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(245,197,24,0.4); }
+        .btn-process:active { transform: translateY(0); }
+        .divider { border: none; border-top: 1px solid #E0E0E0; margin: 1.25rem 0; }
+        .results-empty { text-align: center; padding: 4rem 2rem; color: #AAAAAA; }
+        .results-empty-icon { font-size: 4rem; margin-bottom: 1rem; display: block; }
+        .results-empty h3 { font-size: 1.2rem; color: #666666; margin-bottom: 0.5rem; }
+        .doc-result { border: 1px solid #E0E0E0; border-radius: 10px; overflow: hidden; margin-bottom: 1.5rem; }
+        .doc-header { background: #1A1A1A; padding: 1rem 1.5rem; display: flex; align-items: center; justify-content: space-between; }
+        .doc-filename { color: #FFFFFF; font-weight: 600; font-size: 0.95rem; display: flex; align-items: center; gap: 8px; }
+        .doc-filename::before { content: "📄"; }
+        .doc-stats { display: flex; gap: 12px; flex-wrap: wrap; }
+        .doc-stat { background: rgba(245,197,24,0.15); border: 1px solid rgba(245,197,24,0.3); color: #F5C518; padding: 3px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
+        .doc-body { padding: 1.5rem; }
+        .btn-export { display: inline-flex; align-items: center; gap: 6px; background: #1A1A1A; color: #F5C518; border: 1px solid #F5C518; padding: 6px 14px; border-radius: 6px; font-size: 0.8rem; font-weight: 600; text-decoration: none; cursor: pointer; transition: all 0.2s; margin-bottom: 1rem; }
+        .btn-export:hover { background: #F5C518; color: #1A1A1A; }
+        .chunks-list { display: flex; flex-direction: column; gap: 8px; max-height: 600px; overflow-y: auto; }
+        .chunks-list::-webkit-scrollbar { width: 6px; }
+        .chunks-list::-webkit-scrollbar-track { background: #F8F8F8; border-radius: 3px; }
+        .chunks-list::-webkit-scrollbar-thumb { background: #F5C518; border-radius: 3px; }
+        .chunk-item { border: 1px solid #E0E0E0; border-radius: 8px; overflow: hidden; transition: border-color 0.2s; }
+        .chunk-item:hover { border-color: #F5C518; }
+        .chunk-header { background: #F8F8F8; padding: 0.6rem 1rem; display: flex; align-items: center; justify-content: space-between; cursor: pointer; user-select: none; }
+        .chunk-header:hover { background: #F0F0F0; }
+        .chunk-index { background: #F5C518; color: #1A1A1A; width: 26px; height: 26px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 0.75rem; font-weight: 700; flex-shrink: 0; }
+        .chunk-meta { display: flex; gap: 8px; align-items: center; flex: 1; margin: 0 10px; }
+        .chunk-meta-tag { font-size: 0.72rem; color: #666666; background: #EEEEEE; padding: 2px 8px; border-radius: 10px; }
+        .chunk-toggle { color: #999999; font-size: 0.8rem; }
+        .chunk-text { padding: 0.75rem 1rem; font-size: 0.85rem; line-height: 1.6; color: #333333; border-top: 1px solid #E0E0E0; display: none; white-space: pre-wrap; word-break: break-word; }
+        .chunk-item.expanded .chunk-text { display: block; }
+        .chunk-item.expanded .chunk-toggle { transform: rotate(180deg); display: inline-block; }
+        .alert-error { background: #FFF5F5; border: 1px solid #FFCCCC; color: #CC0000; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
+        .loading-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 1000; align-items: center; justify-content: center; }
+        .loading-overlay.active { display: flex; }
+        .loading-box { background: #1A1A1A; border: 2px solid #F5C518; border-radius: 16px; padding: 2.5rem 3rem; text-align: center; color: white; }
+        .spinner { width: 50px; height: 50px; border: 4px solid rgba(245,197,24,0.2); border-top-color: #F5C518; border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 1.25rem; }
+        @@keyframes spin { to { transform: rotate(360deg); } }
+        .loading-text { font-size: 1rem; font-weight: 600; color: #F5C518; }
+        .loading-sub { font-size: 0.8rem; color: #999999; margin-top: 0.4rem; }
+        footer { background: #1A1A1A; color: #888888; text-align: center; padding: 1.5rem; font-size: 0.8rem; margin-top: 3rem; }
+        footer span { color: #F5C518; }
+        @@media (max-width: 900px) { .main-container { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+
+<div class="loading-overlay" id="loadingOverlay">
+    <div class="loading-box">
+        <div class="spinner"></div>
+        <div class="loading-text">Processing PDFs...</div>
+        <div class="loading-sub">Extracting text and chunking content</div>
+    </div>
+</div>
+
+<header>
+    <a href="/" class="logo">
+        <div class="logo-icon">C</div>
+        <span class="logo-text">Chunk<span>Master</span></span>
+    </a>
+    <span class="header-badge">Advanced PDF Chunking</span>
+</header>
+
+<div class="hero">
+    <h1>Intelligent PDF <span>Chunking</span> Platform</h1>
+    <p>Transform your PDFs into perfectly sized chunks using advanced NLP, semantic analysis, and custom regex patterns.</p>
+    <div class="strategy-badges">
+        <span class="strategy-badge">&#129504; NLP-Based</span>
+        <span class="strategy-badge">&#128269; Semantic</span>
+        <span class="strategy-badge">&#9889; Regex</span>
+        <span class="strategy-badge">&#128256; Hybrid</span>
+    </div>
+</div>
+
+<div class="main-container">
+    <div>
+        <form asp-controller="Chunking" asp-action="Process" method="post" enctype="multipart/form-data" id="chunkForm">
+            @Html.AntiForgeryToken()
+            <div class="panel">
+                <div class="panel-header">
+                    <div class="panel-icon">&#128193;</div>
+                    <h2>Upload PDFs</h2>
+                </div>
+                <div class="panel-body">
+                    <div class="file-drop-zone" id="dropZone">
+                        <input type="file" name="Files" id="fileInput" accept=".pdf" multiple />
+                        <div class="file-drop-icon">&#128196;</div>
+                        <div class="file-drop-text">
+                            <strong>Click to upload</strong> or drag &amp; drop<br/>
+                            <span>PDF files only &middot; Multiple files supported</span>
+                        </div>
+                        <div class="file-names" id="fileNames"></div>
+                    </div>
+                </div>
+            </div>
+
+            <br/>
+
+            <div class="panel">
+                <div class="panel-header">
+                    <div class="panel-icon">&#9881;&#65039;</div>
+                    <h2>Chunking Strategy</h2>
+                </div>
+                <div class="panel-body">
+                    <div class="form-group">
+                        <label class="form-label">Select Strategy</label>
+                        <div class="strategy-grid" id="strategyGrid">
+                            <label class="strategy-card selected">
+                                <input type="radio" name="Strategy" value="0" checked />
+                                <div class="strategy-card-icon">&#129504;</div>
+                                <div class="strategy-card-name">NLP</div>
+                                <div class="strategy-card-desc">Sentence-aware splitting</div>
+                            </label>
+                            <label class="strategy-card">
+                                <input type="radio" name="Strategy" value="1" />
+                                <div class="strategy-card-icon">&#128269;</div>
+                                <div class="strategy-card-name">Semantic</div>
+                                <div class="strategy-card-desc">Topic-based boundaries</div>
+                            </label>
+                            <label class="strategy-card">
+                                <input type="radio" name="Strategy" value="2" />
+                                <div class="strategy-card-icon">&#9889;</div>
+                                <div class="strategy-card-name">Regex</div>
+                                <div class="strategy-card-desc">Pattern-based splitting</div>
+                            </label>
+                            <label class="strategy-card">
+                                <input type="radio" name="Strategy" value="3" />
+                                <div class="strategy-card-icon">&#128256;</div>
+                                <div class="strategy-card-name">Hybrid</div>
+                                <div class="strategy-card-desc">Semantic + NLP combined</div>
+                            </label>
+                        </div>
+                    </div>
+
+                    <hr class="divider" />
+
+                    <div class="form-group">
+                        <label class="form-label">Max Chunk Size (chars)</label>
+                        <div class="slider-container">
+                            <input type="range" class="slider" id="chunkSizeSlider" name="MaxChunkSize" min="100" max="3000" step="50" value="500" />
+                            <span class="slider-value" id="chunkSizeVal">500</span>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Overlap (chars)</label>
+                        <div class="slider-container">
+                            <input type="range" class="slider" id="overlapSlider" name="Overlap" min="0" max="300" step="10" value="50" />
+                            <span class="slider-value" id="overlapVal">50</span>
+                        </div>
+                    </div>
+
+                    <div class="form-group" id="regexGroup" style="display:none">
+                        <label class="form-label">Regex Pattern</label>
+                        <input type="text" class="form-control" name="RegexPattern" placeholder="e.g. (?&lt;=[.!?])\s+" />
+                    </div>
+
+                    <button type="submit" class="btn-process" onclick="showLoading()">
+                        &#9654; Process PDFs
+                    </button>
+                </div>
+            </div>
+        </form>
+    </div>
+
+    <div class="panel">
+        <div class="panel-header">
+            <div class="panel-icon">&#128202;</div>
+            <h2>Results</h2>
+            @if (Model.HasResults)
+            {
+                <span style="margin-left: auto; color: #F5C518; font-size: 0.85rem; font-weight: 600;">
+                    @Model.Results.Count document(s) processed
+                </span>
+            }
+        </div>
+        <div class="panel-body">
+            @if (!string.IsNullOrEmpty(Model.ErrorMessage))
+            {
+                <div class="alert-error">&#9888;&#65039; @Model.ErrorMessage</div>
+            }
+
+            @if (!Model.HasResults)
+            {
+                <div class="results-empty">
+                    <span class="results-empty-icon">&#128450;&#65039;</span>
+                    <h3>No results yet</h3>
+                    <p>Upload PDF files and configure your chunking strategy, then click "Process PDFs" to see the results here.</p>
+                </div>
+            }
+            else
+            {
+                for (int docIdx = 0; docIdx < Model.Results.Count; docIdx++)
+                {
+                    var doc = Model.Results[docIdx];
+                    <div class="doc-result">
+                        <div class="doc-header">
+                            <span class="doc-filename">@doc.FileName</span>
+                            <div class="doc-stats">
+                                <span class="doc-stat">&#128196; @doc.TotalPages pages</span>
+                                <span class="doc-stat">&#128290; @doc.TotalChunks chunks</span>
+                                <span class="doc-stat">&#9889; @doc.ProcessingTimeMs ms</span>
+                                <span class="doc-stat">&#128256; @doc.Strategy</span>
+                            </div>
+                        </div>
+                        <div class="doc-body">
+                            <a href="/Chunking/Export?documentIndex=@docIdx" class="btn-export">
+                                &#11015; Export JSON
+                            </a>
+                            <div class="chunks-list">
+                                @foreach (var chunk in doc.Chunks)
+                                {
+                                    <div class="chunk-item" onclick="toggleChunk(this)">
+                                        <div class="chunk-header">
+                                            <span class="chunk-index">@(chunk.Index + 1)</span>
+                                            <div class="chunk-meta">
+                                                <span class="chunk-meta-tag">@chunk.WordCount words</span>
+                                                <span class="chunk-meta-tag">@chunk.CharCount chars</span>
+                                                <span class="chunk-meta-tag" style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:200px;">@(chunk.Text.Length > 60 ? chunk.Text.Substring(0, 60) + "..." : chunk.Text)</span>
+                                            </div>
+                                            <span class="chunk-toggle">&#9660;</span>
+                                        </div>
+                                        <div class="chunk-text">@chunk.Text</div>
+                                    </div>
+                                }
+                            </div>
+                        </div>
+                    </div>
+                }
+            }
+        </div>
+    </div>
+</div>
+
+<footer>
+    <span>ChunkMaster</span> &mdash; Advanced PDF Chunking Platform &middot; Built with .NET 8 &middot; NLP &middot; Semantic &middot; Regex &middot; Hybrid
+</footer>
+
+<script>
+    document.getElementById('fileInput').addEventListener('change', function() {
+        const names = Array.from(this.files).map(f => f.name).join(', ');
+        document.getElementById('fileNames').textContent = names || '';
+    });
+
+    const dropZone = document.getElementById('dropZone');
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+    dropZone.addEventListener('drop', e => {
+        e.preventDefault();
+        dropZone.classList.remove('dragover');
+        const dt = e.dataTransfer;
+        document.getElementById('fileInput').files = dt.files;
+        const names = Array.from(dt.files).map(f => f.name).join(', ');
+        document.getElementById('fileNames').textContent = names;
+    });
+
+    const chunkSlider = document.getElementById('chunkSizeSlider');
+    const overlapSlider = document.getElementById('overlapSlider');
+    chunkSlider.addEventListener('input', () => document.getElementById('chunkSizeVal').textContent = chunkSlider.value);
+    overlapSlider.addEventListener('input', () => document.getElementById('overlapVal').textContent = overlapSlider.value);
+
+    document.querySelectorAll('.strategy-card input[type="radio"]').forEach(radio => {
+        radio.addEventListener('change', function() {
+            document.querySelectorAll('.strategy-card').forEach(c => c.classList.remove('selected'));
+            this.closest('.strategy-card').classList.add('selected');
+            document.getElementById('regexGroup').style.display = this.value === '2' ? 'block' : 'none';
+        });
+    });
+
+    function toggleChunk(el) {
+        el.classList.toggle('expanded');
+    }
+
+    function showLoading() {
+        const files = document.getElementById('fileInput').files;
+        if (files.length > 0) {
+            document.getElementById('loadingOverlay').classList.add('active');
+        }
+    }
+</script>
+
+</body>
+</html>
