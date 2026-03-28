@@ -1,0 +1,35 @@
+# .NET build artifacts
+**/bin/
+**/obj/
+*.user
+*.suo
+.vs/
+# Publish artifacts
+**/publish/
+# NuGet packages
+*.nupkg
+# User-specific files
+*.rsuser
+*.userosscache
+*.sln.docstates
+# Build results
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+[Xx]64/
+[Xx]86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+# MSTest test Results
+[Tt]est[Rr]esult*/
+# ASP.NET
+wwwroot/lib/
+# Node
+node_modules/
