@@ -1035,7 +1035,7 @@ function renderChunkCard(c, displayIdx) {
         <span class="chunk-score-badge ${scoreBadgeClass}">${scoreLabel}</span>
       </div>
       <div class="chunk-text" id="ctext-${c.chunk_index}">${escHtml(preview)}${isTruncated ? '…' : ''}</div>
-      ${isTruncated ? `<span class="chunk-expand" onclick="expandChunk(event,'${c.chunk_index}')">▼ show full</span>` : ''}
+      ${isTruncated ? `<span class="chunk-expand" data-expand-idx="${c.chunk_index}">▼ show full</span>` : ''}
       ${entities ? `<div class="chunk-entities">${entities}</div>` : ''}
       <div class="chunk-detail" id="cdetail-${c.chunk_index}">
         <div class="detail-row">
@@ -1057,15 +1057,19 @@ function toggleChunkDetail(el) {
   if (detail) detail.classList.toggle('open');
 }
 
-function expandChunk(ev, idx) {
+// Event-delegation handler for expand buttons (avoids inline onclick with interpolated data)
+document.addEventListener('click', function(ev) {
+  const btn = ev.target.closest('[data-expand-idx]');
+  if (!btn) return;
   ev.stopPropagation();
+  const idx = btn.dataset.expandIdx;
   const el = document.getElementById('ctext-' + idx);
   const chunk = allChunks.find(c => String(c.chunk_index) === String(idx));
   if (el && chunk) {
     el.textContent = chunk.text;
-    ev.target.remove();
+    btn.remove();
   }
-}
+});
 
 /* ── Pipeline Inspector ────────────────────────────────────────────────── */
 function renderInspector(results) {

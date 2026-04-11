@@ -14,7 +14,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-# Target average words-per-chunk used in the reward count-penalty calculation
+# Target average words-per-chunk used in the reward count-penalty calculation.
+# 300 words (~400 tokens) is a widely cited sweet-spot for RAG retrieval
+# chunks — large enough to carry full context, small enough to stay focused.
 _TARGET_WORDS_PER_CHUNK = 300
 
 # Pipeline stages that are re-run each iteration

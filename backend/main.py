@@ -13,6 +13,8 @@ import threading
 import traceback
 from typing import Any, Dict, List
 
+MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
+
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -362,7 +364,7 @@ def _finalise_chunks(chunks: list) -> list:
 async def upload_document(file: UploadFile = File(...)) -> JSONResponse:
     """Accept a file upload and store its parsed text content."""
     content = await file.read()
-    if len(content) > 50 * 1024 * 1024:  # 50 MB guard
+    if len(content) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(413, "File too large (max 50 MB).")
 
     text = _parse_file(file.filename or "upload.txt", content)

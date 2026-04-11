@@ -37,7 +37,7 @@ def filter_boundaries(
     """
     Score every boundary and merge those that exceed τ_sem.
 
-    Adds to each chunk: boundary_score (float in [0,1]).
+    Adds to each chunk: boundary_score (float in [0,1]), icc (float in [0,1]).
     Returns a new (possibly shorter) list of chunk dicts.
     """
     if not chunks:
@@ -49,6 +49,7 @@ def filter_boundaries(
     # First chunk always kept; its boundary_score reflects similarity to chunk 0
     result: List[Dict] = [dict(chunks[0])]
     result[0]["boundary_score"] = 0.0  # no previous boundary
+    result[0]["icc"] = _compute_icc(result[0]["text"])
 
     for idx in range(1, len(chunks)):
         prev = result[-1]
@@ -73,6 +74,7 @@ def filter_boundaries(
             )
 
         curr["boundary_score"] = round(float(boundary_score), 4)
+        curr["icc"] = _compute_icc(curr["text"])
 
         # Merge if chunks are too similar and combined size is acceptable
         prev_wc = len(prev["text"].split())
@@ -162,6 +164,24 @@ def _token_type_match(text1: str, text2: str) -> float:
 
 def _tokenize(text: str) -> List[str]:
     return re.findall(r"\b\w+\b", text.lower())
+
+
+def _compute_icc(text: str) -> float:
+    """
+    Intra-Chunk Cohesion: average Jaccard overlap between consecutive sentences.
+    Returns a float in [0, 1]; 0.5 is the default for very short chunks.
+    """
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    if len(sentences) < 2:
+        return 0.5
+    overlaps: List[float] = []
+    for i in range(len(sentences) - 1):
+        a = set(re.findall(r"\b\w+\b", sentences[i].lower()))
+        b = set(re.findall(r"\b\w+\b", sentences[i + 1].lower()))
+        union = a | b
+        if union:
+            overlaps.append(len(a & b) / len(union))
+    return float(np.mean(overlaps)) if overlaps else 0.5
 
 
 def _cosine_similarity(
