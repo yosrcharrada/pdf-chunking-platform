@@ -14,6 +14,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+# Target average words-per-chunk used in the reward count-penalty calculation
+_TARGET_WORDS_PER_CHUNK = 300
+
 # Pipeline stages that are re-run each iteration
 from .s2_chunkers import run_all_chunkers, select_best_strategy
 from .s3_entropy import refine_boundaries
@@ -131,7 +134,7 @@ def _compute_reward(
     # Chunk count penalty: penalise both too many and too few
     chunk_count = len(chunks)
     target_count = max(3.0, float(
-        sum(len(c["text"].split()) for c in chunks) / 300
+        sum(len(c["text"].split()) for c in chunks) / _TARGET_WORDS_PER_CHUNK
     ))
     count_penalty = abs(chunk_count - target_count) / max(target_count, 1.0)
 

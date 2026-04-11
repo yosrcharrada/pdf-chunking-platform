@@ -11,7 +11,7 @@ import json
 import uuid
 import threading
 import traceback
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -76,7 +76,7 @@ def _parse_pdf(content: bytes) -> str:
     # Try pdfplumber first, then PyPDF2
     try:
         import pdfplumber  # noqa: PLC0415
-        pages: list[str] = []
+        pages: List[str] = []
         with pdfplumber.open(io.BytesIO(content)) as pdf:
             for page in pdf.pages:
                 text = page.extract_text()

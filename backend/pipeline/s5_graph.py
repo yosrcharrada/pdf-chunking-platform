@@ -83,7 +83,7 @@ def enrich_graph(
     for i, chunk in enumerate(enriched):
         for ent in chunk.get("entities", []):
             key = ent["text"].lower()
-            if key not in entity_to_chunks[key]:
+            if i not in entity_to_chunks[key]:
                 entity_to_chunks[key].append(i)
 
     # ---- Build adjacency (edge_count between chunk pairs) ----
