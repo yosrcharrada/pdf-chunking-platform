@@ -29,7 +29,7 @@ def _get_nlp():
     if _nlp is not None:
         return _nlp
     try:
-        import spacy  # noqa: PLC0415
+        import spacy  # noqa: E402
         _nlp = spacy.load("en_core_web_sm", disable=["parser", "tagger", "lemmatizer"])
         _spacy_available = True
     except Exception:

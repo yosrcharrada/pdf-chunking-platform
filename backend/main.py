@@ -77,7 +77,7 @@ def _parse_file(filename: str, content: bytes) -> str:
 def _parse_pdf(content: bytes) -> str:
     # Try pdfplumber first, then PyPDF2
     try:
-        import pdfplumber  # noqa: PLC0415
+        import pdfplumber  # noqa: E402
         pages: List[str] = []
         with pdfplumber.open(io.BytesIO(content)) as pdf:
             for page in pdf.pages:
@@ -89,7 +89,7 @@ def _parse_pdf(content: bytes) -> str:
         pass
 
     try:
-        import PyPDF2  # noqa: PLC0415
+        import PyPDF2  # noqa: E402
         reader = PyPDF2.PdfReader(io.BytesIO(content))
         pages = [
             reader.pages[i].extract_text() or ""

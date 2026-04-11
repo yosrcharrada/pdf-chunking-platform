@@ -31,7 +31,7 @@ def _get_model(model_name: str):
     if model_name in _model_cache:
         return _model_cache[model_name]
     try:
-        from sentence_transformers import SentenceTransformer  # noqa: PLC0415
+        from sentence_transformers import SentenceTransformer  # noqa: E402
         model = SentenceTransformer(model_name)
         _model_cache[model_name] = model
         return model
