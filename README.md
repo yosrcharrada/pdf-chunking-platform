@@ -105,11 +105,11 @@ Adjust it if you deploy the API elsewhere.
 |-------|--------|-------------|
 | S1 | `s1_profiler.py` | Classifies type (prose/code/table/mixed), domain, length bucket; computes RC/ICC/DCC/BI/SC quality metrics |
 | S2 | `s2_chunkers.py` | Runs recursive character split, sliding-window, and structure-based chunkers in parallel |
-| S3 | `s3_entropy.py` | Computes JSD between adjacent chunks; EMA rolling hidden state for macro topic shifts |
+| S3 | `s3_entropy.py` | Computes JSD between adjacent chunks; true LSTM cell (input/forget/cell/output gates, cell state cₜ and hidden state hₜ) tracks entropy drift across boundaries for macro topic shift detection |
 | S4 | `s4_boundary.py` | Scores each boundary with BLEU n-gram + syntactic overlap + token-type match; merges over-similar pairs |
-| S5 | `s5_graph.py` | spaCy NER on every chunk; builds shared-entity graph; computes weighted-neighbour graph vectors |
+| S5 | `s5_graph.py` | spaCy NER on every chunk; persistent KGStore boosts edge weights from prior runs; builds shared-entity graph; computes weighted-neighbour graph vectors; writes new entity co-occurrences back to KG |
 | S6 | `s6_embedding.py` | Late chunking for short docs; context-header prepend + per-chunk embedding for long docs |
-| S7 | `s7_rl.py` | Iterative RL loop: perturbs thresholds, re-runs S2–S6, keeps changes only if reward improves |
+| S7 | `s7_rl.py` | LSTMQAgent encodes state through LSTM, selects actions epsilon-greedily from a tabular Q-table, applies Bellman Q-update Q(s,a)←r+γ·max Q(s′,a′) after each trial; re-runs S2–S6 and keeps improvements |
 
 ---
 

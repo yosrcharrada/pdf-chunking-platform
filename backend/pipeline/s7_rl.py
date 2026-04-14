@@ -220,8 +220,20 @@ def run_rl_loop(
     model_name = config.get("embedding_model", "all-MiniLM-L6-v2")
     doc_type   = doc_profile.get("type", "prose")
 
+    # LSTMQAgent hyperparameters — configurable with sensible defaults
+    rl_hidden_dim = int(config.get("rl_hidden_dim", 8))
+    rl_lr         = float(config.get("rl_lr",      0.1))
+    rl_gamma      = float(config.get("rl_gamma",   0.9))
+    rl_epsilon    = float(config.get("rl_epsilon", 0.3))
+
     probe_queries = _generate_probes(text, n=5)
-    agent = LSTMQAgent(state_dim=5, hidden_dim=8, lr=0.1, gamma=0.9, epsilon=0.3)
+    agent = LSTMQAgent(
+        state_dim=5,
+        hidden_dim=rl_hidden_dim,
+        lr=rl_lr,
+        gamma=rl_gamma,
+        epsilon=rl_epsilon,
+    )
 
     def _state_vec(chunks: List[Dict]) -> np.ndarray:
         return np.array([

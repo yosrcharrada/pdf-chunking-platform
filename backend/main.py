@@ -13,11 +13,11 @@ import threading
 import traceback
 from typing import Any, Dict, List
 
-MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
-
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+
+MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
 
 # ── Pipeline stages ───────────────────────────────────────────────────────
 from pipeline.s1_profiler import profile_document
