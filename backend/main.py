@@ -123,7 +123,7 @@ def _run_pipeline(job_id: str, doc_id: str, user_config: Dict[str, Any]) -> None
             return
 
         text: str = doc["content"]
-        config = {**DEFAULT_CONFIG, **user_config}
+        config = {**DEFAULT_CONFIG, **user_config, "job_id": job_id}
 
         # ── S1: Profile ───────────────────────────────────────────────────
         _update_job(

@@ -1,19 +1,102 @@
 """
 S5 — Graph Enrichment
 Runs spaCy NER on every chunk, builds a shared-entity graph where nodes
-are chunks and edges link chunks sharing ≥1 named entity, then computes:
+are chunks and edges link chunks sharing >= 1 named entity, then computes:
 
-    h_graph(Cᵢ) = mean( embeddings of Cᵢ's neighbours, weighted by edge count )
+    h_graph(Ci) = mean( embeddings of Ci's neighbours, weighted by edge count )
 
 The enriched vector plus entity metadata are stored on each chunk.
 Falls back gracefully when spaCy is unavailable.
+
+KG Store (Fix 3)
+-----------------
+A module-level KGStore singleton persists entity co-occurrence relationships
+across pipeline runs as a JSON file.  enrich_graph() reads prior edge weights
+BEFORE building the current graph (so the KG acts as an input to S5, not only
+a post-hoc write), then writes the merged result back after processing.
 """
 
+import json
+import os
 import re
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+
+
+# ---------------------------------------------------------------------------
+# Persistent Knowledge Graph Store  (Fix 3)
+# ---------------------------------------------------------------------------
+
+KG_STORE_PATH = os.path.join(os.path.dirname(__file__), "..", "kg_store.json")
+
+
+class KGStore:
+    """
+    Persistent knowledge graph store.
+
+    Persists entity co-occurrence relationships across pipeline runs.
+    S5 reads prior entity edges before building the current graph,
+    then writes the merged result back — making the KG cumulative.
+    """
+
+    def __init__(self, path: str = KG_STORE_PATH):
+        self.path = os.path.abspath(path)
+        self.entity_cooccurrence: Dict[str, Dict[str, int]] = defaultdict(
+            lambda: defaultdict(int)
+        )
+        self.entity_chunk_index: Dict[str, List[str]] = defaultdict(list)
+        self._load()
+
+    def _load(self) -> None:
+        if os.path.exists(self.path):
+            try:
+                with open(self.path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                for ent_a, neighbours in data.get("cooccurrence", {}).items():
+                    for ent_b, weight in neighbours.items():
+                        self.entity_cooccurrence[ent_a][ent_b] = int(weight)
+                self.entity_chunk_index = defaultdict(
+                    list, data.get("chunk_index", {})
+                )
+            except Exception:
+                pass  # start fresh if file is corrupt
+
+    def save(self) -> None:
+        try:
+            data = {
+                "cooccurrence": {
+                    k: dict(v) for k, v in self.entity_cooccurrence.items()
+                },
+                "chunk_index": dict(self.entity_chunk_index),
+            }
+            with open(self.path, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False, indent=2)
+        except Exception:
+            pass  # non-fatal — KG store write failure should not break pipeline
+
+    def add_chunk_entities(self, chunk_id: str, entities: List[str]) -> None:
+        """Register entities from a new chunk and update co-occurrence counts."""
+        for ent in entities:
+            if chunk_id not in self.entity_chunk_index[ent]:
+                self.entity_chunk_index[ent].append(chunk_id)
+        for idx_a, ent_a in enumerate(entities):
+            for ent_b in entities[idx_a + 1:]:
+                self.entity_cooccurrence[ent_a][ent_b] += 1
+                self.entity_cooccurrence[ent_b][ent_a] += 1
+
+    def get_prior_weight(self, ent_a: str, ent_b: str) -> int:
+        """Return historical co-occurrence count between two entities."""
+        return int(self.entity_cooccurrence.get(ent_a, {}).get(ent_b, 0))
+
+    def get_prior_chunk_ids(self, entity: str) -> List[str]:
+        """Return all chunk IDs that previously contained this entity."""
+        return list(self.entity_chunk_index.get(entity, []))
+
+
+# Module-level KGStore singleton — shared across pipeline runs
+_kg_store = KGStore()
 
 
 # ---------------------------------------------------------------------------
@@ -49,9 +132,13 @@ def enrich_graph(
 ) -> List[Dict]:
     """
     Enrich each chunk with:
-        entities        – list of {text, label} dicts found by NER
-        graph_neighbors – list of chunk indices sharing an entity
-        graph_vector    – mean-pooled neighbour embedding (list[float])
+        entities        - list of {text, label} dicts found by NER
+        graph_neighbors - list of chunk indices sharing an entity
+        graph_vector    - mean-pooled neighbour embedding (list[float])
+
+    Prior entity co-occurrence knowledge from the KGStore is read FIRST to
+    boost current edge weights, then new entity data is written back so the
+    KG grows cumulatively across runs.
 
     Returns the enriched list (same length).
     """
@@ -59,6 +146,7 @@ def enrich_graph(
         return chunks
 
     enriched = [dict(c) for c in chunks]
+    job_id = config.get("job_id", "unknown")
 
     # ---- NER ----
     nlp = _get_nlp()
@@ -78,7 +166,7 @@ def enrich_graph(
             ents = _regex_ner(text)
         enriched[i]["entities"] = ents
 
-    # ---- Build entity → chunk index mapping ----
+    # ---- Build entity -> chunk index mapping ----
     entity_to_chunks: Dict[str, List[int]] = defaultdict(list)
     for i, chunk in enumerate(enriched):
         for ent in chunk.get("entities", []):
@@ -86,13 +174,25 @@ def enrich_graph(
             if i not in entity_to_chunks[key]:
                 entity_to_chunks[key].append(i)
 
-    # ---- Build adjacency (edge_count between chunk pairs) ----
+    # ---- Build adjacency from current run ----
     edge_counts: Dict[tuple, int] = defaultdict(int)
     for ent_key, idxs in entity_to_chunks.items():
         for a in range(len(idxs)):
             for b in range(a + 1, len(idxs)):
                 pair = (min(idxs[a], idxs[b]), max(idxs[a], idxs[b]))
                 edge_counts[pair] += 1
+
+    # ---- Boost edge weights using KG prior knowledge (Fix 3: KG as input) ----
+    for i in range(len(enriched)):
+        for j in range(i + 1, len(enriched)):
+            ents_i = {e["text"].lower() for e in enriched[i].get("entities", [])}
+            ents_j = {e["text"].lower() for e in enriched[j].get("entities", [])}
+            for ei in ents_i:
+                for ej in ents_j:
+                    prior = _kg_store.get_prior_weight(ei, ej)
+                    if prior > 0:
+                        pair = (i, j)
+                        edge_counts[pair] += prior
 
     # ---- Assign neighbours and compute graph vectors ----
     for i, chunk in enumerate(enriched):
@@ -125,16 +225,24 @@ def enrich_graph(
                 chunk["graph_vector"] = graph_vec.tolist()
             else:
                 chunk["graph_vector"] = (
-                    embeddings[i].copy()
+                    list(embeddings[i])
                     if i < len(embeddings) and embeddings[i]
                     else []
                 )
         else:
             chunk["graph_vector"] = (
-                embeddings[i].copy()
+                list(embeddings[i])
                 if embeddings and i < len(embeddings) and embeddings[i]
                 else []
             )
+
+    # ---- Write new entity co-occurrences back to KG store (Fix 3: KG write) ----
+    for i, chunk in enumerate(enriched):
+        chunk_id = f"{job_id}::C{i}"
+        entity_texts = [e["text"].lower() for e in chunk.get("entities", [])]
+        _kg_store.add_chunk_entities(chunk_id, entity_texts)
+
+    _kg_store.save()
 
     return enriched
 
@@ -147,8 +255,7 @@ def build_entity_graph_data(chunks: List[Dict]) -> Dict[str, Any]:
     nodes = []
     for i, chunk in enumerate(chunks):
         ent_count = len(chunk.get("entities", []))
-        label = f"C{i}"
-        nodes.append({"id": i, "label": label, "entity_count": ent_count})
+        nodes.append({"id": i, "label": f"C{i}", "entity_count": ent_count})
 
     edges: List[Dict] = []
     seen: set = set()
