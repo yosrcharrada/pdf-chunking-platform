@@ -1,0 +1,9 @@
+{
+  "cooccurrence": {},
+  "chunk_index": {
+    "alice": [
+      "test_run::C0",
+      "test_run::C1"
+    ]
+  }
+}
