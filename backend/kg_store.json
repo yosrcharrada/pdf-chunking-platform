@@ -1,9 +1,94 @@
 {
-  "cooccurrence": {},
+  "cooccurrence": {
+    "acme corp": {
+      "beta": 11,
+      "secure": 11,
+      "gateway": 11,
+      "patient": 11,
+      "dr alice smith": 11,
+      "city hospital": 11
+    },
+    "beta": {
+      "acme corp": 11,
+      "secure": 11,
+      "gateway": 11,
+      "patient": 11,
+      "dr alice smith": 11,
+      "city hospital": 11
+    },
+    "secure": {
+      "acme corp": 11,
+      "beta": 11,
+      "gateway": 11,
+      "patient": 11,
+      "dr alice smith": 11,
+      "city hospital": 11
+    },
+    "gateway": {
+      "acme corp": 11,
+      "beta": 11,
+      "secure": 11,
+      "patient": 11,
+      "dr alice smith": 11,
+      "city hospital": 11
+    },
+    "patient": {
+      "acme corp": 11,
+      "beta": 11,
+      "secure": 11,
+      "gateway": 11,
+      "dr alice smith": 11,
+      "city hospital": 11
+    },
+    "dr alice smith": {
+      "acme corp": 11,
+      "beta": 11,
+      "secure": 11,
+      "gateway": 11,
+      "patient": 11,
+      "city hospital": 11
+    },
+    "city hospital": {
+      "acme corp": 11,
+      "beta": 11,
+      "secure": 11,
+      "gateway": 11,
+      "patient": 11,
+      "dr alice smith": 11
+    }
+  },
   "chunk_index": {
     "alice": [
       "test_run::C0",
       "test_run::C1"
+    ],
+    "acme corp": [
+      "demo::C0",
+      "unknown::C0"
+    ],
+    "beta": [
+      "demo::C0",
+      "unknown::C0"
+    ],
+    "secure": [
+      "demo::C0",
+      "unknown::C0"
+    ],
+    "gateway": [
+      "demo::C0",
+      "unknown::C0"
+    ],
+    "patient": [
+      "demo::C0",
+      "unknown::C0"
+    ],
+    "dr alice smith": [
+      "demo::C0",
+      "unknown::C0"
+    ],
+    "city hospital": [
+      "demo::C0",
+      "unknown::C0"
     ]
   }
 }

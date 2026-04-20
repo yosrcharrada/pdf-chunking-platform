@@ -639,12 +639,42 @@
     <div class="config-row">
       <div class="config-label">τ_JSD high <span id="val-jsd-high">0.45</span></div>
       <input type="range" id="cfg-jsd-high" min="0.20" max="0.80" step="0.01" value="0.45"
-             oninput="document.getElementById('val-jsd-high').textContent=parseFloat(this.value).toFixed(2)" />
+              oninput="document.getElementById('val-jsd-high').textContent=parseFloat(this.value).toFixed(2)" />
+    </div>
+    <div class="config-row">
+      <div class="config-label">Entropy metric</div>
+      <select id="cfg-entropy-metric" data-reactive="1">
+        <option value="jsd">JSD</option>
+        <option value="hellinger">Hellinger</option>
+        <option value="hybrid" selected>Hybrid</option>
+      </select>
+    </div>
+    <div class="config-row">
+      <div class="config-label">Hybrid λ <span id="val-hybrid-lambda">0.60</span></div>
+      <input type="range" id="cfg-hybrid-lambda" min="0.10" max="0.90" step="0.01" value="0.60"
+             oninput="document.getElementById('val-hybrid-lambda').textContent=parseFloat(this.value).toFixed(2)" data-reactive="1" />
+    </div>
+    <div class="config-row">
+      <div class="config-label">Thresholding mode</div>
+      <select id="cfg-threshold-mode" data-reactive="1">
+        <option value="fixed">Fixed</option>
+        <option value="percentile" selected>Percentile</option>
+      </select>
+    </div>
+    <div class="config-row">
+      <div class="config-label">Low percentile <span id="val-pctl-low">25</span></div>
+      <input type="range" id="cfg-pctl-low" min="5" max="45" step="1" value="25"
+             oninput="document.getElementById('val-pctl-low').textContent=this.value" data-reactive="1" />
+    </div>
+    <div class="config-row">
+      <div class="config-label">High percentile <span id="val-pctl-high">75</span></div>
+      <input type="range" id="cfg-pctl-high" min="55" max="95" step="1" value="75"
+             oninput="document.getElementById('val-pctl-high').textContent=this.value" data-reactive="1" />
     </div>
     <div class="config-row">
       <div class="config-label">τ_sem similarity <span id="val-sem">0.75</span></div>
       <input type="range" id="cfg-sem" min="0.40" max="0.95" step="0.01" value="0.75"
-             oninput="document.getElementById('val-sem').textContent=parseFloat(this.value).toFixed(2)" />
+              oninput="document.getElementById('val-sem').textContent=parseFloat(this.value).toFixed(2)" />
     </div>
 
     <div class="config-title" style="margin-top:4px">Optimization</div>
@@ -839,7 +869,13 @@
             <div class="chart-container">
               <canvas id="rl-chart"></canvas>
             </div>
+            <div id="reward-breakdown" class="text-muted mt-4" style="font-size:12px;"></div>
           </div>
+        </div>
+
+        <div class="card" style="margin-top:20px">
+          <div class="card-title">Embedding Ensemble Composition</div>
+          <div id="ensemble-composition" class="text-muted" style="font-size:12px;"></div>
         </div>
 
         <!-- S5: Entity graph -->
@@ -902,6 +938,10 @@ const state = {
 
 let jsdChart  = null;
 let rlChart   = null;
+
+document.addEventListener('DOMContentLoaded', () => {
+  bindReactiveControls();
+});
 
 /* ── Tab switching ─────────────────────────────────────────────────────── */
 document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -1203,9 +1243,9 @@ function renderInspector(results) {
     { num:'S1', name:'Document Profiler',
       detail: details.s1 ? `Type: ${details.s1.type} · Domain: ${details.s1.domain} · ${details.s1.token_count} tokens` : '' },
     { num:'S2', name:'Parallel Chunkers',
-      detail: details.s2 ? `Recursive: ${details.s2.strategies?.recursive||0} · Sliding: ${details.s2.strategies?.sliding_window||0} · Structure: ${details.s2.strategies?.structure||0} → selected ${details.s2.selected_count}` : '' },
+      detail: details.s2 ? `Recursive: ${details.s2.strategies?.recursive||0} · Sliding: ${details.s2.strategies?.sliding_window||0} · Structure: ${details.s2.strategies?.structure||0} · Semantic: ${details.s2.strategies?.semantic_boundaries||0} · Cluster: ${details.s2.strategies?.sentence_clustering||0} → selected ${details.s2.selected_count}` : '' },
     { num:'S3', name:'Entropy Boundary Refinement',
-      detail: details.s3 ? `${details.s3.chunk_count} chunks after JSD merge pass` : '' },
+      detail: details.s3 ? `${details.s3.chunk_count} chunks · Metric: ${(details.s3.metric||'jsd').toUpperCase()} · Mode: ${details.s3.thresholds?.mode||'fixed'}` : '' },
     { num:'S4', name:'Boundary Quality Filter',
       detail: details.s4 ? `${details.s4.chunk_count} chunks after BLEU filter` : '' },
     { num:'S5', name:'Graph Enrichment',
@@ -1234,6 +1274,12 @@ function renderInspector(results) {
   // RL reward chart
   const rewardHistory = results.reward_history || [];
   renderRlChart(rewardHistory);
+  renderRewardBreakdown(details.s7?.reward_breakdown || {});
+
+  const models = details.s6?.ensemble_models || [];
+  document.getElementById('ensemble-composition').textContent = models.length
+    ? `Models used: ${models.join(', ')}`
+    : `Fallback model: ${details.s6?.model || 'n/a'}`;
 
   // Entity graph
   const graphData = (details.s5 && details.s5.entity_graph) ? details.s5.entity_graph : null;
@@ -1245,13 +1291,14 @@ function renderJsdChart(series, tauLow, tauHigh) {
   const ctx = document.getElementById('jsd-chart');
   if (!ctx) return;
   const labels = series.map((_, i) => `C${i}`);
+  const metricName = (document.getElementById('cfg-entropy-metric')?.value || 'jsd').toUpperCase();
   jsdChart = new Chart(ctx, {
     type: 'line',
     data: {
       labels,
       datasets: [
         {
-          label: 'JSD Score',
+          label: `${metricName} Score`,
           data: series,
           borderColor: '#111111',
           backgroundColor: 'rgba(255,230,0,0.12)',
@@ -1317,6 +1364,31 @@ function renderRlChart(history) {
         y: { ticks: { color: '#7f776a', font: { size: 10 } }, grid: { color: '#e5dbca' } },
       },
     },
+  });
+}
+
+function renderRewardBreakdown(breakdown) {
+  const el = document.getElementById('reward-breakdown');
+  if (!el) return;
+  if (!breakdown || Object.keys(breakdown).length === 0) {
+    el.textContent = 'No multi-objective reward breakdown available.';
+    return;
+  }
+  el.textContent = `Quality: ${((breakdown.quality||0)*100).toFixed(1)}% · Coverage: ${((breakdown.coverage||0)*100).toFixed(1)}% · Consistency: ${((breakdown.consistency||0)*100).toFixed(1)}% · Efficiency: ${((breakdown.efficiency||0)*100).toFixed(1)}% · Total: ${(breakdown.total||0).toFixed(4)}`;
+}
+
+function bindReactiveControls() {
+  const ids = [
+    'cfg-jsd-low','cfg-jsd-high','cfg-entropy-metric','cfg-hybrid-lambda',
+    'cfg-threshold-mode','cfg-pctl-low','cfg-pctl-high','cfg-sem'
+  ];
+  ids.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const eventName = el.tagName === 'SELECT' ? 'change' : 'input';
+    el.addEventListener(eventName, () => {
+      if (state.results) renderInspector(state.results);
+    });
   });
 }
 
@@ -1445,12 +1517,22 @@ function getConfig() {
     n_max: parseInt(document.getElementById('cfg-nmax').value),
     tau_jsd_low: parseFloat(document.getElementById('cfg-jsd-low').value),
     tau_jsd_high: parseFloat(document.getElementById('cfg-jsd-high').value),
+    entropy_metric: document.getElementById('cfg-entropy-metric').value,
+    hybrid_lambda: parseFloat(document.getElementById('cfg-hybrid-lambda').value),
+    threshold_mode: document.getElementById('cfg-threshold-mode').value,
+    tau_percentile_low: parseInt(document.getElementById('cfg-pctl-low').value),
+    tau_percentile_high: parseInt(document.getElementById('cfg-pctl-high').value),
     tau_sem: parseFloat(document.getElementById('cfg-sem').value),
     max_iterations: parseInt(document.getElementById('cfg-maxiter').value),
     alpha: parseFloat(document.getElementById('cfg-alpha').value),
     beta: parseFloat(document.getElementById('cfg-beta').value),
     lambda: parseFloat(document.getElementById('cfg-lambda').value),
     embedding_model: document.getElementById('cfg-model').value,
+    ensemble_models: [
+      'all-MiniLM-L6-v2',
+      'all-mpnet-base-v2',
+      'jina-embeddings-v2-base-en',
+    ],
   };
 }
 

@@ -1,30 +1,50 @@
 """
 S1 — Document Profiler
-Classifies document type/domain, computes intrinsic quality metrics,
-and suggests initial hyperparameters for downstream stages.
+Expanded domain detection, adaptive metric weighting, and uncertainty estimates.
 """
 
 import re
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 
 import numpy as np
 
 
-def profile_document(text: str, config: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Profile the document and return classification, metrics, and
-    suggested hyperparameters.
+DOMAIN_KEYWORDS: Dict[str, List[str]] = {
+    "legal": ["statute", "clause", "agreement", "liability", "jurisdiction", "indemnity", "contract", "hereby"],
+    "medical": ["patient", "diagnosis", "treatment", "clinical", "therapy", "symptom", "hospital", "dosage"],
+    "academic": ["abstract", "methodology", "citation", "hypothesis", "literature", "peer review", "thesis", "dataset"],
+    "financial": ["revenue", "profit", "loss", "equity", "fiscal", "balance sheet", "cash flow", "valuation"],
+    "technical": ["algorithm", "api", "repository", "deployment", "protocol", "database", "framework", "runtime"],
+    "narrative": ["chapter", "character", "plot", "scene", "dialogue", "protagonist", "story", "novel"],
+    "scientific": ["experiment", "variable", "control group", "statistical", "finding", "evidence", "sample", "observation"],
+    "regulatory": ["compliance", "regulation", "audit", "governance", "policy", "risk", "control", "obligation"],
+    "marketing": ["campaign", "conversion", "audience", "brand", "segmentation", "retention", "funnel", "roi"],
+    "education": ["curriculum", "assessment", "learning", "student", "teacher", "pedagogy", "course", "instruction"],
+    "cybersecurity": ["vulnerability", "threat", "malware", "encryption", "incident", "firewall", "authentication", "exploit"],
+    "product": ["roadmap", "feature", "release", "user story", "backlog", "ux", "adoption", "prioritization"],
+    "operations": ["workflow", "throughput", "sla", "capacity", "scheduling", "logistics", "inventory", "downtime"],
+    "policy": ["guideline", "directive", "standards", "framework", "mandate", "protocol", "code of conduct", "principle"],
+    "research": ["benchmark", "model", "inference", "evaluation", "baseline", "ablation", "metric", "corpus"],
+}
 
-    Returns:
-        dict with keys: type, domain, length_bucket, token_count,
-                        metrics (RC, ICC, DCC, BI, SC, overall),
-                        suggested_config
-    """
+
+DOMAIN_METRIC_WEIGHTS: Dict[str, Dict[str, float]] = {
+    "legal": {"RC": 0.30, "ICC": 0.20, "DCC": 0.20, "BI": 0.20, "SC": 0.10},
+    "medical": {"RC": 0.20, "ICC": 0.25, "DCC": 0.25, "BI": 0.15, "SC": 0.15},
+    "academic": {"RC": 0.30, "ICC": 0.20, "DCC": 0.25, "BI": 0.10, "SC": 0.15},
+    "financial": {"RC": 0.20, "ICC": 0.20, "DCC": 0.25, "BI": 0.20, "SC": 0.15},
+    "technical": {"RC": 0.15, "ICC": 0.25, "DCC": 0.25, "BI": 0.20, "SC": 0.15},
+    "narrative": {"RC": 0.05, "ICC": 0.30, "DCC": 0.30, "BI": 0.20, "SC": 0.15},
+}
+
+DEFAULT_WEIGHTS = {"RC": 0.20, "ICC": 0.20, "DCC": 0.20, "BI": 0.20, "SC": 0.20}
+
+
+def profile_document(text: str, config: Dict[str, Any]) -> Dict[str, Any]:
     tokens = text.split()
     token_count = len(tokens)
-
     doc_type = _classify_type(text)
-    domain = _classify_domain(text)
+    domain, domain_scores = _classify_domain(text, config)
 
     if token_count < 1000:
         length_bucket = "short"
@@ -34,14 +54,21 @@ def profile_document(text: str, config: Dict[str, Any]) -> Dict[str, Any]:
         length_bucket = "long"
 
     metrics = _compute_metrics(text, tokens, doc_type)
+    adaptive_weights = _resolve_metric_weights(domain, config)
+    weighted_overall = float(sum(metrics[k] * adaptive_weights[k] for k in ("RC", "ICC", "DCC", "BI", "SC")))
+    uncertainty = _bootstrap_uncertainty(text, doc_type, adaptive_weights, int(config.get("bootstrap_samples", 120)))
+    metrics["weighted_overall"] = round(weighted_overall, 4)
     suggested = _suggest_hyperparams(token_count, doc_type, metrics, config)
 
     return {
         "type": doc_type,
         "domain": domain,
+        "domain_scores": domain_scores,
         "length_bucket": length_bucket,
         "token_count": token_count,
         "metrics": metrics,
+        "metric_weights": adaptive_weights,
+        "uncertainty": uncertainty,
         "suggested_config": suggested,
     }
 
@@ -82,45 +109,26 @@ def _classify_type(text: str) -> str:
     return "prose"
 
 
-def _classify_domain(text: str) -> str:
+def _classify_domain(text: str, config: Dict[str, Any]) -> Tuple[str, Dict[str, int]]:
     text_lower = text.lower()
-    domains: Dict[str, List[str]] = {
-        "technical": [
-            "algorithm", "function", "api", "database", "server",
-            "software", "hardware", "network", "protocol", "interface",
-            "implementation", "framework", "repository", "deployment",
-        ],
-        "financial": [
-            "revenue", "profit", "loss", "investment", "portfolio",
-            "equity", "dividend", "fiscal", "balance sheet",
-            "cash flow", "earnings", "gdp", "bond",
-        ],
-        "clinical": [
-            "patient", "diagnosis", "treatment", "symptom", "clinical",
-            "medical", "therapy", "drug", "dosage", "disease",
-            "procedure", "physician", "hospital",
-        ],
-        "narrative": [
-            "story", "character", "chapter", "novel", "author",
-            "narrative", "protagonist", "plot", "setting", "scene",
-        ],
-    }
-
-    scores = {
-        domain: sum(text_lower.count(kw) for kw in kws)
-        for domain, kws in domains.items()
-    }
+    custom = config.get("domain_keywords", {})
+    domains = {**DOMAIN_KEYWORDS, **(custom if isinstance(custom, dict) else {})}
+    scores = {}
+    for domain, kws in domains.items():
+        count = 0
+        for kw in kws:
+            pattern = r"\b" + re.escape(str(kw).lower()) + r"\b"
+            count += len(re.findall(pattern, text_lower))
+        scores[domain] = count
     best = max(scores, key=scores.get)
-    return best if scores[best] > 0 else "general"
+    return (best if scores[best] > 0 else "general"), scores
 
 
 # ---------------------------------------------------------------------------
 # Metric computation
 # ---------------------------------------------------------------------------
 
-def _compute_metrics(
-    text: str, tokens: List[str], doc_type: str
-) -> Dict[str, float]:
+def _compute_metrics(text: str, tokens: List[str], doc_type: str) -> Dict[str, float]:
     sentences = _split_sentences(text)
     paragraphs = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
 
@@ -154,6 +162,45 @@ def _compute_metrics(
         "BI": round(bi, 4),
         "SC": round(sc, 4),
         "overall": round(overall, 4),
+    }
+
+
+def _resolve_metric_weights(domain: str, config: Dict[str, Any]) -> Dict[str, float]:
+    user_weights = config.get("metric_weights", {})
+    if isinstance(user_weights, dict) and all(k in user_weights for k in ("RC", "ICC", "DCC", "BI", "SC")):
+        raw = {k: float(user_weights[k]) for k in ("RC", "ICC", "DCC", "BI", "SC")}
+    else:
+        raw = DOMAIN_METRIC_WEIGHTS.get(domain, DEFAULT_WEIGHTS)
+    total = sum(raw.values()) or 1.0
+    return {k: round(float(v / total), 4) for k, v in raw.items()}
+
+
+def _bootstrap_uncertainty(
+    text: str,
+    doc_type: str,
+    weights: Dict[str, float],
+    samples: int,
+) -> Dict[str, Any]:
+    sentences = _split_sentences(text)
+    if len(sentences) < 3:
+        return {"samples": 0, "weighted_overall_ci95": [0.0, 0.0], "weighted_overall_std": 0.0}
+
+    rng = np.random.default_rng(42)
+    sample_count = max(20, min(samples, 400))
+    weighted_scores: List[float] = []
+    for _ in range(sample_count):
+        picked = [sentences[int(i)] for i in rng.integers(0, len(sentences), size=len(sentences))]
+        sampled_text = " ".join(picked)
+        sampled_metrics = _compute_metrics(sampled_text, sampled_text.split(), doc_type)
+        weighted_scores.append(sum(sampled_metrics[k] * weights[k] for k in ("RC", "ICC", "DCC", "BI", "SC")))
+
+    arr = np.array(weighted_scores, dtype=np.float32)
+    ci_low = float(np.percentile(arr, 2.5))
+    ci_high = float(np.percentile(arr, 97.5))
+    return {
+        "samples": sample_count,
+        "weighted_overall_ci95": [round(ci_low, 4), round(ci_high, 4)],
+        "weighted_overall_std": round(float(np.std(arr)), 4),
     }
 
 

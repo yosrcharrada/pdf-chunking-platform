@@ -11,6 +11,8 @@ import json
 import uuid
 import threading
 import traceback
+import logging
+import os
 from typing import Any, Dict, List
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -18,6 +20,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
 MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
+logger = logging.getLogger("autochunker")
+if not logger.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
+    )
 
 # ── Pipeline stages ───────────────────────────────────────────────────────
 from pipeline.s1_profiler import profile_document
@@ -44,6 +52,22 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "beta": 0.4,
     "lambda": 0.2,
     "embedding_model": "all-MiniLM-L6-v2",
+    "entropy_metric": "hybrid",
+    "hybrid_lambda": 0.6,
+    "threshold_mode": "percentile",
+    "tau_percentile_low": 25,
+    "tau_percentile_high": 75,
+    "ensemble_models": [
+        "all-MiniLM-L6-v2",
+        "all-mpnet-base-v2",
+        "jina-embeddings-v2-base-en",
+    ],
+    "reward_objectives": {
+        "quality": 0.35,
+        "coverage": 0.30,
+        "consistency": 0.20,
+        "efficiency": 0.15,
+    },
 }
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -58,6 +82,24 @@ app.add_middleware(
 )
 
 
+def _load_config_yaml() -> Dict[str, Any]:
+    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config.yaml"))
+    if not os.path.exists(path):
+        return {}
+    try:
+        import yaml  # type: ignore
+
+        with open(path, "r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+_yaml_cfg = _load_config_yaml()
+DEFAULT_CONFIG = {**DEFAULT_CONFIG, **(_yaml_cfg.get("pipeline", {}) if isinstance(_yaml_cfg, dict) else {})}
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Helper: parse uploaded file to plain text
 # ═══════════════════════════════════════════════════════════════════════════
@@ -69,9 +111,9 @@ def _parse_file(filename: str, content: bytes) -> str:
         return _parse_pdf(content)
     # TXT, MD, code files — decode as UTF-8 with fallback
     try:
-        return content.decode("utf-8")
+        return _sanitize_text(content.decode("utf-8"))
     except UnicodeDecodeError:
-        return content.decode("latin-1", errors="replace")
+        return _sanitize_text(content.decode("latin-1", errors="replace"))
 
 
 def _parse_pdf(content: bytes) -> str:
@@ -84,7 +126,7 @@ def _parse_pdf(content: bytes) -> str:
                 text = page.extract_text()
                 if text:
                     pages.append(text)
-        return "\n\n".join(pages)
+        return _sanitize_text("\n\n".join(pages))
     except Exception:
         pass
 
@@ -95,11 +137,46 @@ def _parse_pdf(content: bytes) -> str:
             reader.pages[i].extract_text() or ""
             for i in range(len(reader.pages))
         ]
-        return "\n\n".join(pages)
+        return _sanitize_text("\n\n".join(pages))
     except Exception:
         pass
 
-    return content.decode("utf-8", errors="replace")
+    return _sanitize_text(content.decode("utf-8", errors="replace"))
+
+
+def _sanitize_text(text: str) -> str:
+    clean = text.replace("\x00", " ")
+    clean = clean.replace("\r\n", "\n")
+    return clean.strip()
+
+
+def _validate_user_config(user_config: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = dict(user_config or {})
+    numeric_ranges = {
+        "n_min": (20, 400),
+        "n_max": (80, 1200),
+        "tau_jsd_low": (0.01, 0.6),
+        "tau_jsd_high": (0.05, 0.95),
+        "tau_sem": (0.2, 0.99),
+        "max_iterations": (1, 30),
+        "alpha": (0.0, 1.0),
+        "beta": (0.0, 1.0),
+        "lambda": (0.0, 1.0),
+        "hybrid_lambda": (0.0, 1.0),
+    }
+    for key, (low, high) in numeric_ranges.items():
+        if key in cfg:
+            try:
+                value = float(cfg[key])
+                value = max(low, min(high, value))
+                cfg[key] = int(value) if key in {"n_min", "n_max", "max_iterations"} else value
+            except Exception:
+                cfg.pop(key, None)
+    if cfg.get("tau_jsd_low", DEFAULT_CONFIG["tau_jsd_low"]) >= cfg.get("tau_jsd_high", DEFAULT_CONFIG["tau_jsd_high"]):
+        cfg["tau_jsd_high"] = float(cfg.get("tau_jsd_low", 0.15)) + 0.1
+    metric = str(cfg.get("entropy_metric", DEFAULT_CONFIG["entropy_metric"])).lower()
+    cfg["entropy_metric"] = metric if metric in {"jsd", "hellinger", "hybrid"} else DEFAULT_CONFIG["entropy_metric"]
+    return cfg
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -117,13 +194,14 @@ def _update_job(job_id: str, **kwargs) -> None:
 
 def _run_pipeline(job_id: str, doc_id: str, user_config: Dict[str, Any]) -> None:
     try:
+        logger.info(f'{{"job_id":"{job_id}","event":"pipeline_start"}}')
         doc = doc_store.get(doc_id)
         if not doc:
             _update_job(job_id, status="error", error="Document not found.")
             return
 
         text: str = doc["content"]
-        config = {**DEFAULT_CONFIG, **user_config, "job_id": job_id}
+        config = {**DEFAULT_CONFIG, **_validate_user_config(user_config), "job_id": job_id}
 
         # ── S1: Profile ───────────────────────────────────────────────────
         _update_job(
@@ -148,10 +226,13 @@ def _run_pipeline(job_id: str, doc_id: str, user_config: Dict[str, Any]) -> None
             progress=15,
             message="Running parallel chunkers…",
         )
-        all_chunks_map = run_all_chunkers(text, doc_profile["type"], config)
-        initial_chunks = select_best_strategy(
-            all_chunks_map, doc_profile["type"], config
-        )
+        try:
+            all_chunks_map = run_all_chunkers(text, doc_profile["type"], config)
+            initial_chunks = select_best_strategy(all_chunks_map, doc_profile["type"], config)
+        except Exception:
+            logger.exception("S2 failed; falling back to single chunk")
+            all_chunks_map = {"fallback": [{"text": text, "start": 0, "end": len(text), "method": "fallback"}]}
+            initial_chunks = all_chunks_map["fallback"]
 
         if not initial_chunks:
             # Ultra-short document: treat the whole text as one chunk
@@ -186,7 +267,12 @@ def _run_pipeline(job_id: str, doc_id: str, user_config: Dict[str, Any]) -> None
             job_id,
             stage_details={
                 **job_store[job_id].get("stage_details", {}),
-                "s3": {"jsd_series": jsd_series, "chunk_count": len(refined)},
+                "s3": {
+                    "jsd_series": jsd_series,
+                    "chunk_count": len(refined),
+                    "metric": config.get("entropy_metric", "jsd"),
+                    "thresholds": refined[-1].get("thresholds", {}) if refined else {},
+                },
             },
         )
 
@@ -203,7 +289,10 @@ def _run_pipeline(job_id: str, doc_id: str, user_config: Dict[str, Any]) -> None
             job_id,
             stage_details={
                 **job_store[job_id].get("stage_details", {}),
-                "s4": {"chunk_count": len(filtered)},
+                "s4": {
+                    "chunk_count": len(filtered),
+                    "weighted_decision": True,
+                },
             },
         )
 
@@ -247,6 +336,7 @@ def _run_pipeline(job_id: str, doc_id: str, user_config: Dict[str, Any]) -> None
                 "s6": {
                     "embedding_dim": len(embeddings[0]) if embeddings else 0,
                     "model": config["embedding_model"],
+                    "ensemble_models": config.get("ensemble_models", []),
                 },
             },
         )
@@ -270,6 +360,7 @@ def _run_pipeline(job_id: str, doc_id: str, user_config: Dict[str, Any]) -> None
                     "reward_history": reward_history,
                     "iterations": len(reward_history),
                     "final_config": final_config,
+                    "reward_breakdown": final_config.get("reward_breakdown", {}),
                 },
             },
         )
@@ -316,8 +407,10 @@ def _run_pipeline(job_id: str, doc_id: str, user_config: Dict[str, Any]) -> None
             message="Pipeline complete.",
             results=results,
         )
+        logger.info(f'{{"job_id":"{job_id}","event":"pipeline_complete","chunks":{len(final_chunks)}}}')
 
     except Exception as exc:
+        logger.exception("Pipeline failed")
         _update_job(
             job_id,
             status="error",
@@ -399,7 +492,7 @@ async def run_pipeline(
         raise HTTPException(404, "Document not found.")
 
     try:
-        user_config = json.loads(config)
+        user_config = _validate_user_config(json.loads(config))
     except json.JSONDecodeError:
         user_config = {}
 
