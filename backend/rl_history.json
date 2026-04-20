@@ -5,7 +5,6 @@
     "n_max": 500,
     "tau_sem": 0.75,
     "hybrid_lambda": 0.6,
-    "merge_weight": null,
     "last_reward_components": {
       "quality": 1.0,
       "coverage": 0.75,

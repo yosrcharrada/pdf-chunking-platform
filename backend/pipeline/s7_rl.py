@@ -95,17 +95,17 @@ class DQNAgent:
         }
         signs = [-1, 1]
         sign = signs[action_idx % 2]
-        cfg[key] = float(cfg.get(key, 0)) + sign * deltas[key]
+        cfg[key] = (cfg.get(key) or 0.0) + sign * deltas[key]
 
-        cfg["tau_jsd_low"] = float(np.clip(cfg.get("tau_jsd_low", 0.15), 0.05, 0.45))
-        cfg["tau_jsd_high"] = float(np.clip(cfg.get("tau_jsd_high", 0.45), 0.2, 0.8))
+        cfg["tau_jsd_low"] = float(np.clip(cfg.get("tau_jsd_low") or 0.15, 0.05, 0.45))
+        cfg["tau_jsd_high"] = float(np.clip(cfg.get("tau_jsd_high") or 0.45, 0.2, 0.8))
         if cfg["tau_jsd_low"] >= cfg["tau_jsd_high"]:
             cfg["tau_jsd_high"] = cfg["tau_jsd_low"] + 0.1
-        cfg["n_max"] = int(np.clip(cfg.get("n_max", 500), 200, 900))
-        cfg["tau_sem"] = float(np.clip(cfg.get("tau_sem", 0.75), 0.4, 0.95))
-        cfg["hybrid_lambda"] = float(np.clip(cfg.get("hybrid_lambda", 0.6), 0.1, 0.9))
-        cfg["boundary_merge_weight"] = float(np.clip(cfg.get("merge_weight", cfg.get("boundary_merge_weight", 1.0)), 0.5, 1.5))
-        cfg["entropy_metric"] = cfg.get("entropy_metric", "hybrid")
+        cfg["n_max"] = int(np.clip(cfg.get("n_max") or 500, 200, 900))
+        cfg["tau_sem"] = float(np.clip(cfg.get("tau_sem") or 0.75, 0.4, 0.95))
+        cfg["hybrid_lambda"] = float(np.clip(cfg.get("hybrid_lambda") or 0.6, 0.1, 0.9))
+        cfg["boundary_merge_weight"] = float(np.clip(cfg.get("merge_weight") or cfg.get("boundary_merge_weight") or 1.0, 0.5, 1.5))
+        cfg["entropy_metric"] = cfg.get("entropy_metric") or "hybrid"
         return cfg
 
 
@@ -284,22 +284,20 @@ def _warm_start_config(config: Dict[str, Any], history: Dict[str, Any], domain: 
     out = copy.deepcopy(config)
     record = history.get(domain, {})
     for k in ("tau_jsd_low", "tau_jsd_high", "n_max", "tau_sem", "hybrid_lambda", "merge_weight"):
-        if k in record and k not in out:
-            out[k] = record[k]
+        v = record.get(k)
+        if v is not None and k not in out:
+            out[k] = v
     return out
 
 
 def _save_history(domain: str, config: Dict[str, Any], reward_components: Dict[str, float]) -> None:
     history = _load_history()
-    history[domain] = {
-        "tau_jsd_low": config.get("tau_jsd_low"),
-        "tau_jsd_high": config.get("tau_jsd_high"),
-        "n_max": config.get("n_max"),
-        "tau_sem": config.get("tau_sem"),
-        "hybrid_lambda": config.get("hybrid_lambda"),
-        "merge_weight": config.get("merge_weight"),
-        "last_reward_components": reward_components,
-    }
+    record: Dict[str, Any] = {"last_reward_components": reward_components}
+    for k in ("tau_jsd_low", "tau_jsd_high", "n_max", "tau_sem", "hybrid_lambda", "merge_weight"):
+        v = config.get(k)
+        if v is not None:
+            record[k] = v
+    history[domain] = record
     try:
         with open(_RL_HISTORY_PATH, "w", encoding="utf-8") as fh:
             json.dump(history, fh, ensure_ascii=False, indent=2)
