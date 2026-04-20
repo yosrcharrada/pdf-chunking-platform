@@ -8,6 +8,7 @@ stays responsive; progress is polled via GET /status/{job_id}.
 import io
 import csv
 import json
+import re
 import uuid
 import threading
 import traceback
@@ -118,30 +119,41 @@ def _parse_file(filename: str, content: bytes) -> str:
 
 def _parse_pdf(content: bytes) -> str:
     # Try pdfplumber first, then PyPDF2
+    pages: List[str] = []
     try:
         import pdfplumber  # noqa: E402
-        pages: List[str] = []
         with pdfplumber.open(io.BytesIO(content)) as pdf:
             for page in pdf.pages:
                 text = page.extract_text()
                 if text:
                     pages.append(text)
-        return _sanitize_text("\n\n".join(pages))
     except Exception:
         pass
 
-    try:
-        import PyPDF2  # noqa: E402
-        reader = PyPDF2.PdfReader(io.BytesIO(content))
-        pages = [
-            reader.pages[i].extract_text() or ""
-            for i in range(len(reader.pages))
-        ]
-        return _sanitize_text("\n\n".join(pages))
-    except Exception:
-        pass
+    if not pages:
+        try:
+            import PyPDF2  # noqa: E402
+            reader = PyPDF2.PdfReader(io.BytesIO(content))
+            pages = [
+                reader.pages[i].extract_text() or ""
+                for i in range(len(reader.pages))
+            ]
+        except Exception:
+            pass
 
-    return _sanitize_text(content.decode("utf-8", errors="replace"))
+    if not pages:
+        return _sanitize_text(content.decode("utf-8", errors="replace"))
+
+    # ── Clean each page before joining ────────────────────────────────────
+    cleaned = [_clean_pdf_page(p) for p in pages if p.strip()]
+
+    # Detect & strip repeated header/footer lines that appear on most pages.
+    # A line that appears verbatim (after stripping) in ≥ 60 % of pages and
+    # is ≤ 12 words is almost certainly a running header or footer.
+    if len(cleaned) >= 3:
+        cleaned = _strip_repeated_lines(cleaned)
+
+    return _sanitize_text("\n\n".join(cleaned))
 
 
 def _sanitize_text(text: str) -> str:
@@ -150,7 +162,49 @@ def _sanitize_text(text: str) -> str:
     return clean.strip()
 
 
+# Matches a line that contains only a page number: a bare integer, optionally
+# surrounded by dashes or hyphens, e.g. "3", "- 3 -", "3 of 12".
+_PAGE_NUM_RE = re.compile(r"^\s*[-–—]?\s*\d+\s*(?:[-–—]|of\s+\d+)?\s*$")
+
+
+def _clean_pdf_page(page_text: str) -> str:
+    """Remove standalone page-number lines from a single page's text."""
+    lines = page_text.split("\n")
+    kept = [ln for ln in lines if not _PAGE_NUM_RE.match(ln)]
+    return "\n".join(kept)
+
+
+def _strip_repeated_lines(pages: List[str]) -> List[str]:
+    """Remove header/footer lines that appear verbatim on most pages."""
+    from collections import Counter
+
+    # Count how often each short line (≤ 12 words) appears across pages
+    freq: Counter = Counter()
+    for page in pages:
+        # Only look at the first 3 and last 3 lines (where headers/footers live)
+        lines = [ln.strip() for ln in page.split("\n") if ln.strip()]
+        candidates = (lines[:3] + lines[-3:]) if len(lines) > 6 else lines
+        for ln in set(candidates):
+            if 1 <= len(ln.split()) <= 12:
+                freq[ln] += 1
+
+    threshold = max(2, len(pages) * 0.60)
+    noise = {ln for ln, cnt in freq.items() if cnt >= threshold}
+    if not noise:
+        return pages
+
+    cleaned: List[str] = []
+    for page in pages:
+        filtered = "\n".join(
+            ln for ln in page.split("\n") if ln.strip() not in noise
+        )
+        cleaned.append(filtered)
+    return cleaned
+
+
 def _validate_user_config(user_config: Dict[str, Any]) -> Dict[str, Any]:
+    from pipeline.s2_chunkers import VALID_STRATEGIES  # import here to avoid circularity at module level
+
     cfg = dict(user_config or {})
     numeric_ranges = {
         "n_min": (20, 400),
@@ -176,6 +230,9 @@ def _validate_user_config(user_config: Dict[str, Any]) -> Dict[str, Any]:
         cfg["tau_jsd_high"] = float(cfg.get("tau_jsd_low", 0.15)) + 0.1
     metric = str(cfg.get("entropy_metric", DEFAULT_CONFIG["entropy_metric"])).lower()
     cfg["entropy_metric"] = metric if metric in {"jsd", "hellinger", "hybrid"} else DEFAULT_CONFIG["entropy_metric"]
+    # Validate chunking strategy
+    strategy = str(cfg.get("chunking_strategy", "auto")).lower()
+    cfg["chunking_strategy"] = strategy if strategy in VALID_STRATEGIES else "auto"
     return cfg
 
 
@@ -240,6 +297,9 @@ def _run_pipeline(job_id: str, doc_id: str, user_config: Dict[str, Any]) -> None
                 {"text": text, "start": 0, "end": len(text), "method": "fallback"}
             ]
 
+        # Identify which strategy was actually chosen
+        selected_strategy = initial_chunks[0].get("method", "unknown") if initial_chunks else "unknown"
+
         _update_job(
             job_id,
             stage_details={
@@ -249,6 +309,8 @@ def _run_pipeline(job_id: str, doc_id: str, user_config: Dict[str, Any]) -> None
                         k: len(v) for k, v in all_chunks_map.items()
                     },
                     "selected_count": len(initial_chunks),
+                    "selected_strategy": selected_strategy,
+                    "forced_strategy": config.get("chunking_strategy", "auto"),
                 },
             },
         )

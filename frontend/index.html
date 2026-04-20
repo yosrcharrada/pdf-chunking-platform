@@ -619,6 +619,18 @@
     <div class="config-title">Chunking Controls</div>
 
     <div class="config-row">
+      <div class="config-label">Strategy</div>
+      <select id="cfg-strategy">
+        <option value="auto" selected>Auto (best quality)</option>
+        <option value="structure">Structure-based</option>
+        <option value="semantic_boundaries">Semantic boundaries</option>
+        <option value="sentence_clustering">Sentence clustering</option>
+        <option value="recursive">Recursive character</option>
+        <option value="sliding_window">Sliding window</option>
+      </select>
+    </div>
+
+    <div class="config-row">
       <div class="config-label">N_min (tokens) <span id="val-nmin">100</span></div>
       <input type="range" id="cfg-nmin" min="20" max="300" value="100"
              oninput="document.getElementById('val-nmin').textContent=this.value" />
@@ -1243,7 +1255,7 @@ function renderInspector(results) {
     { num:'S1', name:'Document Profiler',
       detail: details.s1 ? `Type: ${details.s1.type} · Domain: ${details.s1.domain} · ${details.s1.token_count} tokens` : '' },
     { num:'S2', name:'Parallel Chunkers',
-      detail: details.s2 ? `Recursive: ${details.s2.strategies?.recursive||0} · Sliding: ${details.s2.strategies?.sliding_window||0} · Structure: ${details.s2.strategies?.structure||0} · Semantic: ${details.s2.strategies?.semantic_boundaries||0} · Cluster: ${details.s2.strategies?.sentence_clustering||0} → selected ${details.s2.selected_count}` : '' },
+      detail: details.s2 ? `Recursive: ${details.s2.strategies?.recursive||0} · Sliding: ${details.s2.strategies?.sliding_window||0} · Structure: ${details.s2.strategies?.structure||0} · Semantic: ${details.s2.strategies?.semantic_boundaries||0} · Cluster: ${details.s2.strategies?.sentence_clustering||0} → used: <strong>${details.s2.selected_strategy||'?'}</strong>${details.s2.forced_strategy && details.s2.forced_strategy !== 'auto' ? ' (forced)' : ' (auto)'}` : '' },
     { num:'S3', name:'Entropy Boundary Refinement',
       detail: details.s3 ? `${details.s3.chunk_count} chunks · Metric: ${(details.s3.metric||'jsd').toUpperCase()} · Mode: ${details.s3.thresholds?.mode||'fixed'}` : '' },
     { num:'S4', name:'Boundary Quality Filter',
@@ -1513,6 +1525,7 @@ function resetAll() {
 /* ── Config ────────────────────────────────────────────────────────────── */
 function getConfig() {
   return {
+    chunking_strategy: document.getElementById('cfg-strategy').value,
     n_min: parseInt(document.getElementById('cfg-nmin').value),
     n_max: parseInt(document.getElementById('cfg-nmax').value),
     tau_jsd_low: parseFloat(document.getElementById('cfg-jsd-low').value),

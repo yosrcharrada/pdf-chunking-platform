@@ -38,8 +38,20 @@ def run_all_chunkers(text: str, doc_type: str, config: Dict[str, Any]) -> Dict[s
     return out
 
 
+VALID_STRATEGIES = {"auto", "recursive", "sliding_window", "structure", "semantic_boundaries", "sentence_clustering"}
+
+
 def select_best_strategy(all_chunks: Dict[str, List[Dict]], doc_type: str, config: Dict[str, Any]) -> List[Dict]:
     n_max = int(config.get("n_max", 500))
+
+    # Allow the user to force a specific strategy
+    forced = str(config.get("chunking_strategy", "auto")).lower()
+    if forced and forced != "auto" and forced in VALID_STRATEGIES:
+        chunks = all_chunks.get(forced)
+        if chunks:
+            return chunks
+        # Forced strategy produced no chunks (e.g. structure on plain prose) – fall through to auto
+
     preferred = {
         "code": ["structure", "semantic_boundaries", "recursive", "sliding_window", "sentence_clustering"],
         "table": ["structure", "sliding_window", "recursive", "semantic_boundaries", "sentence_clustering"],
@@ -185,8 +197,17 @@ def structure_based_split(text: str, doc_type: str) -> List[Dict]:
 
 
 def _split_markup(text: str) -> List[Dict]:
+    # Matches: Markdown headings, HTML headings, LaTeX sectioning, AND
+    # legal/formal article/section headings such as:
+    #   "Article 1:", "ARTICLE 2 :", "Section 3.", "SECTION IV -", "Chapter 2 —"
     header_re = re.compile(
-        r"^(#{1,6}\s+.+|<h[1-6][^>]*>.+?</h[1-6]>|\\(?:chapter|section|subsection|subsubsection)\{[^}]+\})",
+        r"^("
+        r"#{1,6}\s+.+"                                             # Markdown
+        r"|<h[1-6][^>]*>.+?</h[1-6]>"                             # HTML
+        r"|\\(?:chapter|section|subsection|subsubsection)\{[^}]+\}"  # LaTeX
+        r"|(?:ARTICLE|Article|SECTION|Section|CHAPTER|Chapter|TITRE|Titre|PART|Part)"
+        r"\s+[\w\d]+\s*[\:\.\-—–].*"                              # Legal (EN/FR)
+        r")",
         re.MULTILINE | re.IGNORECASE,
     )
     lines = text.split("\n")
