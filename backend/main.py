@@ -8,9 +8,12 @@ stays responsive; progress is polled via GET /status/{job_id}.
 import io
 import csv
 import json
+import re
 import uuid
 import threading
 import traceback
+import logging
+import os
 from typing import Any, Dict, List
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -18,6 +21,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
 MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
+logger = logging.getLogger("autochunker")
+if not logger.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
+    )
 
 # ── Pipeline stages ───────────────────────────────────────────────────────
 from pipeline.s1_profiler import profile_document
@@ -32,6 +41,15 @@ from pipeline.s7_rl import run_rl_loop
 doc_store: Dict[str, Dict] = {}   # document_id → {filename, content, …}
 job_store: Dict[str, Dict] = {}   # job_id      → {status, stage, progress, …}
 
+# ── Benchmark: all strategies to run ─────────────────────────────────────
+STRATEGY_NAMES: List[str] = [
+    "recursive",
+    "sliding_window",
+    "structure",
+    "semantic_boundaries",
+    "sentence_clustering",
+]
+
 # ── Default pipeline configuration ───────────────────────────────────────
 DEFAULT_CONFIG: Dict[str, Any] = {
     "n_min": 100,
@@ -44,6 +62,20 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "beta": 0.4,
     "lambda": 0.2,
     "embedding_model": "all-MiniLM-L6-v2",
+    "threshold_mode": "percentile",
+    "tau_percentile_low": 25,
+    "tau_percentile_high": 75,
+    "ensemble_models": [
+        "all-MiniLM-L6-v2",
+        "all-mpnet-base-v2",
+        "jina-embeddings-v2-base-en",
+    ],
+    "reward_objectives": {
+        "quality": 0.35,
+        "coverage": 0.30,
+        "consistency": 0.20,
+        "efficiency": 0.15,
+    },
 }
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -58,6 +90,24 @@ app.add_middleware(
 )
 
 
+def _load_config_yaml() -> Dict[str, Any]:
+    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config.yaml"))
+    if not os.path.exists(path):
+        return {}
+    try:
+        import yaml  # type: ignore
+
+        with open(path, "r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+_yaml_cfg = _load_config_yaml()
+DEFAULT_CONFIG = {**DEFAULT_CONFIG, **(_yaml_cfg.get("pipeline", {}) if isinstance(_yaml_cfg, dict) else {})}
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Helper: parse uploaded file to plain text
 # ═══════════════════════════════════════════════════════════════════════════
@@ -69,37 +119,126 @@ def _parse_file(filename: str, content: bytes) -> str:
         return _parse_pdf(content)
     # TXT, MD, code files — decode as UTF-8 with fallback
     try:
-        return content.decode("utf-8")
+        return _sanitize_text(content.decode("utf-8"))
     except UnicodeDecodeError:
-        return content.decode("latin-1", errors="replace")
+        return _sanitize_text(content.decode("latin-1", errors="replace"))
 
 
 def _parse_pdf(content: bytes) -> str:
     # Try pdfplumber first, then PyPDF2
+    pages: List[str] = []
     try:
         import pdfplumber  # noqa: E402
-        pages: List[str] = []
         with pdfplumber.open(io.BytesIO(content)) as pdf:
             for page in pdf.pages:
                 text = page.extract_text()
                 if text:
                     pages.append(text)
-        return "\n\n".join(pages)
     except Exception:
         pass
 
-    try:
-        import PyPDF2  # noqa: E402
-        reader = PyPDF2.PdfReader(io.BytesIO(content))
-        pages = [
-            reader.pages[i].extract_text() or ""
-            for i in range(len(reader.pages))
-        ]
-        return "\n\n".join(pages)
-    except Exception:
-        pass
+    if not pages:
+        try:
+            import PyPDF2  # noqa: E402
+            reader = PyPDF2.PdfReader(io.BytesIO(content))
+            pages = [
+                reader.pages[i].extract_text() or ""
+                for i in range(len(reader.pages))
+            ]
+        except Exception:
+            pass
 
-    return content.decode("utf-8", errors="replace")
+    if not pages:
+        return _sanitize_text(content.decode("utf-8", errors="replace"))
+
+    # ── Clean each page before joining ────────────────────────────────────
+    cleaned = [_clean_pdf_page(p) for p in pages if p.strip()]
+
+    # Detect & strip repeated header/footer lines that appear on most pages.
+    # A line that appears verbatim (after stripping) in ≥ 60 % of pages and
+    # is ≤ 12 words is almost certainly a running header or footer.
+    if len(cleaned) >= 3:
+        cleaned = _strip_repeated_lines(cleaned)
+
+    return _sanitize_text("\n\n".join(cleaned))
+
+
+def _sanitize_text(text: str) -> str:
+    clean = text.replace("\x00", " ")
+    clean = clean.replace("\r\n", "\n")
+    return clean.strip()
+
+
+# Matches a line that contains only a page number: a bare integer, optionally
+# surrounded by dashes or hyphens, e.g. "3", "- 3 -", "3 of 12".
+_PAGE_NUM_RE = re.compile(r"^\s*[-–—]?\s*\d+\s*(?:[-–—]|of\s+\d+)?\s*$")
+
+
+def _clean_pdf_page(page_text: str) -> str:
+    """Remove standalone page-number lines from a single page's text."""
+    lines = page_text.split("\n")
+    kept = [ln for ln in lines if not _PAGE_NUM_RE.match(ln)]
+    return "\n".join(kept)
+
+
+def _strip_repeated_lines(pages: List[str]) -> List[str]:
+    """Remove header/footer lines that appear verbatim on most pages."""
+    from collections import Counter
+
+    # Count how often each short line (≤ 12 words) appears across pages
+    freq: Counter = Counter()
+    for page in pages:
+        # Only look at the first 3 and last 3 lines (where headers/footers live)
+        lines = [ln.strip() for ln in page.split("\n") if ln.strip()]
+        candidates = (lines[:3] + lines[-3:]) if len(lines) > 6 else lines
+        for ln in set(candidates):
+            if 1 <= len(ln.split()) <= 12:
+                freq[ln] += 1
+
+    threshold = max(2, len(pages) * 0.60)
+    noise = {ln for ln, cnt in freq.items() if cnt >= threshold}
+    if not noise:
+        return pages
+
+    cleaned: List[str] = []
+    for page in pages:
+        filtered = "\n".join(
+            ln for ln in page.split("\n") if ln.strip() not in noise
+        )
+        cleaned.append(filtered)
+    return cleaned
+
+
+def _validate_user_config(user_config: Dict[str, Any]) -> Dict[str, Any]:
+    from pipeline.s2_chunkers import VALID_STRATEGIES  # import here to avoid circularity at module level
+
+    cfg = dict(user_config or {})
+    numeric_ranges = {
+        "n_min": (20, 400),
+        "n_max": (80, 1200),
+        "tau_jsd_low": (0.01, 0.6),
+        "tau_jsd_high": (0.05, 0.95),
+        "tau_sem": (0.2, 0.99),
+        "max_iterations": (1, 30),
+        "alpha": (0.0, 1.0),
+        "beta": (0.0, 1.0),
+        "lambda": (0.0, 1.0),
+        "hybrid_lambda": (0.0, 1.0),
+    }
+    for key, (low, high) in numeric_ranges.items():
+        if key in cfg:
+            try:
+                value = float(cfg[key])
+                value = max(low, min(high, value))
+                cfg[key] = int(value) if key in {"n_min", "n_max", "max_iterations"} else value
+            except Exception:
+                cfg.pop(key, None)
+    if cfg.get("tau_jsd_low", DEFAULT_CONFIG["tau_jsd_low"]) >= cfg.get("tau_jsd_high", DEFAULT_CONFIG["tau_jsd_high"]):
+        cfg["tau_jsd_high"] = float(cfg.get("tau_jsd_low", 0.15)) + 0.1
+    # Validate chunking strategy (used only for legacy single-strategy mode; ignored in benchmark mode)
+    strategy = str(cfg.get("chunking_strategy", "auto")).lower()
+    cfg["chunking_strategy"] = strategy if strategy in VALID_STRATEGIES else "auto"
+    return cfg
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -117,195 +256,157 @@ def _update_job(job_id: str, **kwargs) -> None:
 
 def _run_pipeline(job_id: str, doc_id: str, user_config: Dict[str, Any]) -> None:
     try:
+        logger.info(f'{{"job_id":"{job_id}","event":"pipeline_start"}}')
         doc = doc_store.get(doc_id)
         if not doc:
             _update_job(job_id, status="error", error="Document not found.")
             return
 
         text: str = doc["content"]
-        config = {**DEFAULT_CONFIG, **user_config, "job_id": job_id}
+        config = {**DEFAULT_CONFIG, **_validate_user_config(user_config), "job_id": job_id}
 
         # ── S1: Profile ───────────────────────────────────────────────────
-        _update_job(
-            job_id,
-            stage="S1",
-            progress=5,
-            message="Profiling document…",
-        )
+        _update_job(job_id, stage="S1", progress=3, message="Profiling document…")
         doc_profile = profile_document(text, config)
-        # Blend suggested params into config (user overrides take precedence)
         suggested = doc_profile.get("suggested_config", {})
         for k, v in suggested.items():
             if k not in user_config:
                 config[k] = v
-
         _update_job(job_id, stage_details={"s1": doc_profile})
 
-        # ── S2: Parallel chunkers ─────────────────────────────────────────
-        _update_job(
-            job_id,
-            stage="S2",
-            progress=15,
-            message="Running parallel chunkers…",
-        )
-        all_chunks_map = run_all_chunkers(text, doc_profile["type"], config)
-        initial_chunks = select_best_strategy(
-            all_chunks_map, doc_profile["type"], config
-        )
-
-        if not initial_chunks:
-            # Ultra-short document: treat the whole text as one chunk
-            initial_chunks = [
-                {"text": text, "start": 0, "end": len(text), "method": "fallback"}
-            ]
+        # ── S2: Parallel chunkers (run once) ──────────────────────────────
+        _update_job(job_id, stage="S2", progress=8, message="Running all parallel chunkers…")
+        try:
+            all_chunks_map = run_all_chunkers(text, doc_profile["type"], config)
+        except Exception:
+            logger.exception("S2 failed; falling back to single chunk")
+            all_chunks_map = {
+                s: [{"text": text, "start": 0, "end": len(text), "method": s}]
+                for s in STRATEGY_NAMES
+            }
 
         _update_job(
             job_id,
             stage_details={
                 **job_store[job_id].get("stage_details", {}),
                 "s2": {
-                    "strategies": {
-                        k: len(v) for k, v in all_chunks_map.items()
-                    },
-                    "selected_count": len(initial_chunks),
+                    "strategies": {k: len(v) for k, v in all_chunks_map.items()},
                 },
             },
         )
 
-        # ── S3: Entropy refinement ────────────────────────────────────────
-        _update_job(
-            job_id,
-            stage="S3",
-            progress=28,
-            message="Computing entropy boundaries…",
-        )
-        refined = refine_boundaries(initial_chunks, config)
-        jsd_series = get_jsd_series(refined)
+        model_name = config.get("embedding_model", "all-MiniLM-L6-v2")
+        benchmark_results: Dict[str, Any] = {}
+        n_strategies = len(STRATEGY_NAMES)
 
-        _update_job(
-            job_id,
-            stage_details={
-                **job_store[job_id].get("stage_details", {}),
-                "s3": {"jsd_series": jsd_series, "chunk_count": len(refined)},
-            },
-        )
+        # ── S3–S7: Per-strategy pipeline ─────────────────────────────────
+        for si, strategy_name in enumerate(STRATEGY_NAMES):
+            pct_base = 10 + si * 17  # 10..93
+            _update_job(
+                job_id,
+                stage=f"S3-{strategy_name}",
+                progress=pct_base,
+                message=f"[{si + 1}/{n_strategies}] Entropy refinement — {strategy_name}…",
+            )
 
-        # ── S4: Boundary quality filter ───────────────────────────────────
-        _update_job(
-            job_id,
-            stage="S4",
-            progress=42,
-            message="Filtering boundaries…",
-        )
-        filtered = filter_boundaries(refined, doc_profile["type"], [], config)
+            raw_chunks = all_chunks_map.get(strategy_name, [])
+            if not raw_chunks:
+                raw_chunks = [{"text": text, "start": 0, "end": len(text), "method": strategy_name}]
 
-        _update_job(
-            job_id,
-            stage_details={
-                **job_store[job_id].get("stage_details", {}),
-                "s4": {"chunk_count": len(filtered)},
-            },
-        )
+            # S3: Entropy (JSD + BiLSTM)
+            try:
+                refined = refine_boundaries(raw_chunks, config)
+                jsd_series = get_jsd_series(refined)
+            except Exception:
+                refined = raw_chunks
+                jsd_series = []
 
-        # ── S5: Graph enrichment ──────────────────────────────────────────
-        _update_job(
-            job_id,
-            stage="S5",
-            progress=55,
-            message="Building entity graph…",
-        )
-        enriched = enrich_graph(filtered, [], config)
-        graph_data = build_entity_graph_data(enriched)
+            _update_job(job_id, progress=pct_base + 2, message=f"[{si + 1}/{n_strategies}] Boundary filter — {strategy_name}…")
 
-        _update_job(
-            job_id,
-            stage_details={
-                **job_store[job_id].get("stage_details", {}),
-                "s5": {"entity_graph": graph_data},
-            },
-        )
+            # S4: Boundary filter
+            try:
+                filtered = filter_boundaries(refined, doc_profile["type"], [], config)
+            except Exception:
+                filtered = refined
 
-        # ── S6: Contextual embedding ──────────────────────────────────────
-        _update_job(
-            job_id,
-            stage="S6",
-            progress=68,
-            message="Generating embeddings…",
-        )
-        embedded, embeddings = embed_chunks(
-            enriched,
-            text,
-            doc_profile,
-            config["embedding_model"],
-            config,
-        )
+            # S5: Graph enrichment
+            _update_job(job_id, progress=pct_base + 4, message=f"[{si + 1}/{n_strategies}] Entity graph — {strategy_name}…")
+            try:
+                enriched = enrich_graph(filtered, [], config)
+                graph_data = build_entity_graph_data(enriched)
+            except Exception:
+                enriched = filtered
+                graph_data = {"nodes": [], "edges": []}
 
-        _update_job(
-            job_id,
-            stage_details={
-                **job_store[job_id].get("stage_details", {}),
-                "s6": {
-                    "embedding_dim": len(embeddings[0]) if embeddings else 0,
-                    "model": config["embedding_model"],
-                },
-            },
-        )
+            # S6: Embeddings
+            _update_job(job_id, progress=pct_base + 7, message=f"[{si + 1}/{n_strategies}] Embeddings — {strategy_name}…")
+            try:
+                embedded, embeddings = embed_chunks(enriched, text, doc_profile, model_name, config)
+            except Exception:
+                embedded = enriched
+                embeddings = []
 
-        # ── S7: RL reward calibration ─────────────────────────────────────
-        _update_job(
-            job_id,
-            stage="S7",
-            progress=78,
-            message="Running RL calibration loop…",
-        )
-        best_chunks, reward_history, final_config = run_rl_loop(
-            text, doc_profile, embedded, config
-        )
+            # S7: RL calibration (strategy-specific)
+            _update_job(job_id, progress=pct_base + 10, message=f"[{si + 1}/{n_strategies}] RL calibration — {strategy_name}…")
+            try:
+                best_chunks, reward_history, final_config = run_rl_loop(
+                    text, doc_profile, embedded, config, strategy_name
+                )
+            except Exception:
+                best_chunks = embedded
+                reward_history = [0.0]
+                final_config = {}
 
-        _update_job(
-            job_id,
-            stage_details={
-                **job_store[job_id].get("stage_details", {}),
-                "s7": {
-                    "reward_history": reward_history,
-                    "iterations": len(reward_history),
-                    "final_config": final_config,
-                },
-            },
-        )
+            final_chunks = _finalise_chunks(best_chunks)
+            mean_score = (
+                sum(c.get("chunk_score", 0.0) for c in final_chunks) / len(final_chunks)
+                if final_chunks else 0.0
+            )
 
-        # ── Final scoring ─────────────────────────────────────────────────
-        _update_job(
-            job_id,
-            stage="DONE",
-            progress=95,
-            message="Finalising results…",
-        )
-        final_chunks = _finalise_chunks(best_chunks)
+            benchmark_results[strategy_name] = {
+                "chunks": final_chunks,
+                "chunk_count": len(final_chunks),
+                "mean_chunk_score": round(mean_score, 4),
+                "reward_history": reward_history,
+                "final_reward": round(reward_history[-1] if reward_history else 0.0, 4),
+                "rl_reward_breakdown": final_config.get("reward_breakdown", {}),
+                "graph_data": graph_data,
+                "jsd_series": jsd_series,
+                "thresholds": refined[-1].get("thresholds", {}) if refined else {},
+            }
+            logger.info(
+                f'{{"job_id":"{job_id}","strategy":"{strategy_name}",'
+                f'"chunks":{len(final_chunks)},"mean_score":{mean_score:.4f}}}'
+            )
 
-        mean_score = (
-            sum(c.get("chunk_score", 0.0) for c in final_chunks) / len(final_chunks)
-            if final_chunks
-            else 0.0
-        )
+        # ── Final: compute best strategy & summary ────────────────────────
+        _update_job(job_id, stage="DONE", progress=95, message="Finalising results…")
+
+        best_strategy = max(
+            benchmark_results.items(),
+            key=lambda x: x[1].get("mean_chunk_score", 0.0),
+        )[0] if benchmark_results else STRATEGY_NAMES[0]
+
+        total_chunks = sum(v["chunk_count"] for v in benchmark_results.values())
+        best_reward = benchmark_results[best_strategy]["final_reward"] if best_strategy in benchmark_results else 0.0
 
         results = {
             "document_id": doc_id,
             "job_id": job_id,
             "doc_profile": doc_profile,
-            "chunks": final_chunks,
+            "benchmark_results": benchmark_results,
             "summary": {
                 "doc_type": doc_profile.get("type"),
                 "domain": doc_profile.get("domain"),
                 "length_bucket": doc_profile.get("length_bucket"),
                 "token_count": doc_profile.get("token_count"),
-                "chunk_count": len(final_chunks),
-                "mean_chunk_score": round(mean_score, 4),
-                "rl_iterations": len(reward_history),
-                "final_reward": reward_history[-1] if reward_history else 0.0,
+                "strategies_evaluated": len(benchmark_results),
+                "best_strategy": best_strategy,
+                "best_mean_score": round(benchmark_results[best_strategy].get("mean_chunk_score", 0.0), 4) if best_strategy in benchmark_results else 0.0,
+                "best_final_reward": round(best_reward, 4),
+                "total_chunks_all_strategies": total_chunks,
             },
             "stage_details": job_store[job_id].get("stage_details", {}),
-            "reward_history": reward_history,
         }
 
         _update_job(
@@ -313,11 +414,13 @@ def _run_pipeline(job_id: str, doc_id: str, user_config: Dict[str, Any]) -> None
             status="complete",
             stage="DONE",
             progress=100,
-            message="Pipeline complete.",
+            message="Benchmark pipeline complete.",
             results=results,
         )
+        logger.info(f'{{"job_id":"{job_id}","event":"pipeline_complete","strategies":{len(benchmark_results)}}}')
 
     except Exception as exc:
+        logger.exception("Pipeline failed")
         _update_job(
             job_id,
             status="error",
@@ -399,7 +502,7 @@ async def run_pipeline(
         raise HTTPException(404, "Document not found.")
 
     try:
-        user_config = json.loads(config)
+        user_config = _validate_user_config(json.loads(config))
     except json.JSONDecodeError:
         user_config = {}
 
@@ -460,75 +563,120 @@ async def get_results(job_id: str) -> JSONResponse:
     return JSONResponse(job["results"])
 
 
-@app.get("/export/{job_id}/{fmt}")
-async def export_results(job_id: str, fmt: str) -> Response:
-    """Download results as json / csv / markdown."""
+@app.get("/export/{job_id}/strategy/{strategy_name}")
+async def export_strategy(job_id: str, strategy_name: str) -> Response:
+    """Download the full chunk results for a single chunking strategy as JSON."""
     job = job_store.get(job_id)
     if not job or job["status"] != "complete":
         raise HTTPException(404, "Results not available.")
 
     results = job["results"]
-    chunks = results.get("chunks", [])
+    benchmark = results.get("benchmark_results", {})
+    strategy_data = benchmark.get(strategy_name)
+    if strategy_data is None:
+        raise HTTPException(404, f"Strategy '{strategy_name}' not found in results.")
+
+    payload = json.dumps(
+        {
+            "strategy": strategy_name,
+            "job_id": job_id,
+            "doc_profile": results.get("doc_profile", {}),
+            **strategy_data,
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
+    return Response(
+        content=payload,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="chunks_{strategy_name}_{job_id[:8]}.json"'
+            )
+        },
+    )
+
+
+@app.get("/export/{job_id}/{fmt}")
+async def export_results(job_id: str, fmt: str) -> Response:
+    """Download results as json / csv / markdown (uses best strategy for CSV/MD)."""
+    job = job_store.get(job_id)
+    if not job or job["status"] != "complete":
+        raise HTTPException(404, "Results not available.")
+
+    results = job["results"]
+    benchmark = results.get("benchmark_results", {})
+    best_strategy = results.get("summary", {}).get("best_strategy")
+    best_data = benchmark.get(best_strategy, {}) if best_strategy else {}
+    chunks = best_data.get("chunks", [])
 
     if fmt == "json":
         payload = json.dumps(results, indent=2, ensure_ascii=False)
         return Response(
             content=payload,
             media_type="application/json",
-            headers={"Content-Disposition": f'attachment; filename="chunks_{job_id[:8]}.json"'},
+            headers={"Content-Disposition": f'attachment; filename="benchmark_{job_id[:8]}.json"'},
         )
 
     if fmt == "csv":
         buf = io.StringIO()
         writer = csv.writer(buf)
         writer.writerow(
-            ["index", "token_count", "chunk_score", "jsd_score",
+            ["strategy", "index", "token_count", "chunk_score", "jsd_score",
              "boundary_score", "boundary_type", "entities", "text_preview"]
         )
-        for c in chunks:
-            ents = ", ".join(e.get("text", "") for e in c.get("entities", []))
-            preview = c.get("text", "")[:120].replace("\n", " ")
-            writer.writerow(
-                [
-                    c.get("chunk_index", ""),
-                    c.get("token_count", ""),
-                    c.get("chunk_score", ""),
-                    c.get("jsd_score", ""),
-                    c.get("boundary_score", ""),
-                    c.get("boundary_type", ""),
-                    ents,
-                    preview,
-                ]
-            )
+        for strat_name, strat_data in benchmark.items():
+            for c in strat_data.get("chunks", []):
+                ents = ", ".join(e.get("text", "") for e in c.get("entities", []))
+                preview = c.get("text", "")[:120].replace("\n", " ")
+                writer.writerow(
+                    [
+                        strat_name,
+                        c.get("chunk_index", ""),
+                        c.get("token_count", ""),
+                        c.get("chunk_score", ""),
+                        c.get("jsd_score", ""),
+                        c.get("boundary_score", ""),
+                        c.get("boundary_type", ""),
+                        ents,
+                        preview,
+                    ]
+                )
         return Response(
             content=buf.getvalue(),
             media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="chunks_{job_id[:8]}.csv"'},
+            headers={"Content-Disposition": f'attachment; filename="benchmark_{job_id[:8]}.csv"'},
         )
 
     if fmt == "markdown":
-        lines = []
+        lines: List[str] = []
         summary = results.get("summary", {})
-        lines.append(f"# AutoChunker Results\n")
+        lines.append("# AutoChunker Benchmark Results\n")
         lines.append(f"- Document type: {summary.get('doc_type')}")
         lines.append(f"- Domain: {summary.get('domain')}")
-        lines.append(f"- Chunks: {summary.get('chunk_count')}")
-        lines.append(f"- Mean score: {summary.get('mean_chunk_score')}\n")
-        for c in chunks:
-            ents = ", ".join(e.get("text", "") for e in c.get("entities", []))
-            lines.append("---")
-            lines.append(
-                f"<!-- chunk_index: {c.get('chunk_index')} | "
-                f"tokens: {c.get('token_count')} | "
-                f"score: {c.get('chunk_score')} | "
-                f"entities: {ents} -->"
-            )
-            lines.append(c.get("text", ""))
-            lines.append("")
+        lines.append(f"- Best strategy: **{summary.get('best_strategy')}**")
+        lines.append(f"- Best mean score: {summary.get('best_mean_score')}\n")
+        for strat_name, strat_data in benchmark.items():
+            lines.append(f"\n## Strategy: {strat_name}\n")
+            lines.append(f"- Chunks: {strat_data.get('chunk_count')}")
+            lines.append(f"- Mean score: {strat_data.get('mean_chunk_score')}")
+            lines.append(f"- Final RL reward: {strat_data.get('final_reward')}\n")
+            for c in strat_data.get("chunks", []):
+                ents = ", ".join(e.get("text", "") for e in c.get("entities", []))
+                lines.append("---")
+                lines.append(
+                    f"<!-- chunk_index: {c.get('chunk_index')} | "
+                    f"strategy: {strat_name} | "
+                    f"tokens: {c.get('token_count')} | "
+                    f"score: {c.get('chunk_score')} | "
+                    f"entities: {ents} -->"
+                )
+                lines.append(c.get("text", ""))
+                lines.append("")
         return Response(
             content="\n".join(lines),
             media_type="text/markdown",
-            headers={"Content-Disposition": f'attachment; filename="chunks_{job_id[:8]}.md"'},
+            headers={"Content-Disposition": f'attachment; filename="benchmark_{job_id[:8]}.md"'},
         )
 
     raise HTTPException(400, f"Unsupported format '{fmt}'. Use json, csv, or markdown.")

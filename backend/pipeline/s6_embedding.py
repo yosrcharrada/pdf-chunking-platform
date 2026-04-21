@@ -1,30 +1,36 @@
 """
-S6 — Contextual Embedding
-Two strategies based on document length:
-
-  Short docs (fit in context window): "late chunking" — embed the full
-      document, then mean-pool the token vectors that belong to each chunk
-      span.
-
-  Long docs: prepend a generated context header to each chunk, then embed
-      each chunk independently with sentence-transformers.
-
-Falls back to a TF-IDF-style bag-of-words vector when sentence-transformers
-is unavailable.
+S6 — Ensemble Embeddings & Domain-Aware Headers
+Uses three complementary embedding models with graceful fallbacks and
+domain-specific context header templates.
 """
 
+import hashlib
+import json
+import os
 import re
-from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-
-# ---------------------------------------------------------------------------
-# Lazy model loader
-# ---------------------------------------------------------------------------
-
 _model_cache: Dict[str, Any] = {}
+_embed_cache_l1: Dict[str, List[List[float]]] = {}
+_cache_dir = os.path.join(os.path.dirname(__file__), "..", ".cache", "embeddings")
+os.makedirs(_cache_dir, exist_ok=True)
+
+DEFAULT_ENSEMBLE = [
+    "all-MiniLM-L6-v2",
+    "all-mpnet-base-v2",
+    "jina-embeddings-v2-base-en",
+]
+
+DOMAIN_TEMPLATES = {
+    "legal": "Legal context: section intent, obligations, governing terms, and enforceable clauses.",
+    "medical": "Medical context: patient condition, clinical findings, interventions, and outcomes.",
+    "technical": "Technical context: architecture, implementation details, interfaces, and constraints.",
+    "financial": "Financial context: performance indicators, accounting treatment, and risk factors.",
+    "academic": "Academic context: hypothesis, methods, evidence, and contribution claims.",
+    "narrative": "Narrative context: storyline progression, actors, events, and thematic transitions.",
+}
 
 
 def _get_model(model_name: str):
@@ -40,10 +46,6 @@ def _get_model(model_name: str):
         return None
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
 def embed_chunks(
     chunks: List[Dict],
     full_text: str,
@@ -51,157 +53,161 @@ def embed_chunks(
     model_name: str,
     config: Dict[str, Any],
 ) -> Tuple[List[Dict], List[List[float]]]:
-    """
-    Embed all chunks and return:
-        - enriched chunk list (adds 'embedding' and optionally 'context_header')
-        - raw list of embedding vectors (parallel to chunks)
-    """
     if not chunks:
         return chunks, []
 
-    length_bucket = doc_profile.get("length_bucket", "medium")
     domain = doc_profile.get("domain", "general")
     doc_type = doc_profile.get("type", "prose")
-
-    model = _get_model(model_name)
-
-    if model is None:
-        # Fallback: TF-IDF bag-of-words
-        embeddings = _bow_embed(chunks, full_text)
-    elif length_bucket == "short":
-        embeddings = _late_chunking(chunks, full_text, model)
-    else:
-        embeddings = _context_header_embed(
-            chunks, full_text, domain, doc_type, model
-        )
+    length_bucket = doc_profile.get("length_bucket", "medium")
+    ensemble_models = config.get("ensemble_models", DEFAULT_ENSEMBLE)
+    if not isinstance(ensemble_models, list) or not ensemble_models:
+        ensemble_models = [model_name]
 
     enriched = [dict(c) for c in chunks]
+    input_texts = _build_input_texts(enriched, full_text, domain, doc_type, length_bucket)
+    embeddings, composition = _ensemble_encode(input_texts, ensemble_models)
+
     for i, chunk in enumerate(enriched):
-        emb = embeddings[i] if i < len(embeddings) else []
-        chunk["embedding"] = emb if isinstance(emb, list) else emb.tolist()
-
-    return enriched, [
-        (e if isinstance(e, list) else e.tolist()) for e in embeddings
-    ]
-
-
-# ---------------------------------------------------------------------------
-# Late chunking (short documents)
-# ---------------------------------------------------------------------------
-
-def _late_chunking(
-    chunks: List[Dict],
-    full_text: str,
-    model,
-) -> List[List[float]]:
-    """
-    Encode the full document once, then mean-pool token vectors per chunk span.
-    For models that expose token-level outputs this is exact; for
-    SentenceTransformer (sentence-level) we approximate by re-encoding each
-    chunk (the "pooling" happens at sentence level internally).
-    """
-    try:
-        # Encode each chunk with the shared model context
-        texts = [c["text"] for c in chunks]
-        vectors = model.encode(texts, show_progress_bar=False, batch_size=32)
-        return [v.tolist() for v in vectors]
-    except Exception:
-        return _bow_embed(chunks, full_text)
+        vec = embeddings[i] if i < len(embeddings) else []
+        chunk["embedding"] = vec
+        chunk["ensemble_embedding"] = {
+            "models": composition.get("models", []),
+            "weights": composition.get("weights", []),
+            "projection_dim": composition.get("projection_dim", 0),
+        }
+    return enriched, embeddings
 
 
-# ---------------------------------------------------------------------------
-# Context-header embedding (long documents)
-# ---------------------------------------------------------------------------
-
-def _context_header_embed(
+def _build_input_texts(
     chunks: List[Dict],
     full_text: str,
     domain: str,
     doc_type: str,
-    model,
-) -> List[List[float]]:
-    # Infer a short topic from the first non-empty sentence of the document
+    length_bucket: str,
+) -> List[str]:
     inferred_topic = _infer_topic(full_text)
-
-    enriched_texts: List[str] = []
+    template = DOMAIN_TEMPLATES.get(domain, "General context: preserve semantics and continuity across chunks.")
+    texts = []
     for chunk in chunks:
-        first_sentence = _first_sentence(chunk["text"])
+        first_sentence = _first_sentence(chunk.get("text", ""))
         header = (
-            f"This chunk is from a {domain} {doc_type} document "
-            f"about {inferred_topic}. "
-            f"The chunk covers: {first_sentence}"
+            f"{template} Document type: {doc_type}. Topic: {inferred_topic}. "
+            f"Chunk focus: {first_sentence}"
         )
         chunk["context_header"] = header
-        enriched_texts.append(header + "\n\n" + chunk["text"])
+        if length_bucket == "short":
+            texts.append(chunk.get("text", ""))
+        else:
+            texts.append(header + "\n\n" + chunk.get("text", ""))
+    return texts
 
+
+def _ensemble_encode(texts: List[str], models: List[str]) -> Tuple[List[List[float]], Dict[str, Any]]:
+    projection_dim = 256
+    component_vectors: List[List[np.ndarray]] = []
+    available_models: List[str] = []
+    for model_name in models:
+        vecs = _encode_with_model(texts, model_name)
+        if not vecs:
+            continue
+        projected = [_project_vector(np.array(v, dtype=np.float32), projection_dim, model_name).astype(np.float32) for v in vecs]
+        component_vectors.append(projected)
+        available_models.append(model_name)
+
+    if not component_vectors:
+        fallback = [_bow_embed_text(t, projection_dim) for t in texts]
+        return [v.tolist() for v in fallback], {"models": ["bow_fallback"], "weights": [1.0], "projection_dim": projection_dim}
+
+    weights = np.array([1.0] * len(component_vectors), dtype=np.float32)
+    weights = weights / max(np.sum(weights), 1.0)
+    final: List[List[float]] = []
+    for i in range(len(texts)):
+        agg = np.zeros(projection_dim, dtype=np.float32)
+        for j, vectors in enumerate(component_vectors):
+            agg += vectors[i] * weights[j]
+        final.append(agg.tolist())
+
+    return final, {
+        "models": available_models,
+        "weights": [round(float(w), 4) for w in weights.tolist()],
+        "projection_dim": projection_dim,
+    }
+
+
+def _encode_with_model(texts: List[str], model_name: str) -> Optional[List[List[float]]]:
+    model = _get_model(model_name)
+    if model is None:
+        return None
+    cache_key = _cache_key(model_name, texts)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
     try:
-        vectors = model.encode(
-            enriched_texts, show_progress_bar=False, batch_size=16
-        )
-        return [v.tolist() for v in vectors]
+        vectors = model.encode(texts, show_progress_bar=False, batch_size=16)
+        output = [v.tolist() for v in vectors]
+        _cache_set(cache_key, output)
+        return output
     except Exception:
-        return _bow_embed(chunks, full_text)
+        return None
 
 
-# ---------------------------------------------------------------------------
-# Fallback: TF-IDF-inspired BoW embedding
-# ---------------------------------------------------------------------------
-
-def _bow_embed(chunks: List[Dict], full_text: str) -> List[List[float]]:
-    """
-    Produce a lightweight sparse-then-projected embedding when
-    sentence-transformers is unavailable.  Uses term-frequency vectors
-    projected to 128 dims via a deterministic random projection.
-    """
-    vocab = _build_vocab(full_text, max_terms=2000)
-    vocab_idx = {w: i for i, w in enumerate(vocab)}
-    dim = len(vocab)
-
-    tf_vectors: List[np.ndarray] = []
-    for chunk in chunks:
-        tokens = re.findall(r"\b\w+\b", chunk["text"].lower())
-        vec = np.zeros(dim, dtype=np.float32)
-        for t in tokens:
-            if t in vocab_idx:
-                vec[vocab_idx[t]] += 1.0
-        norm = np.linalg.norm(vec)
-        if norm > 0:
-            vec /= norm
-        tf_vectors.append(vec)
-
-    # Random projection to 128 dims (deterministic seed for reproducibility)
-    rng = np.random.default_rng(seed=42)
-    proj = rng.normal(0, 1.0 / np.sqrt(128), size=(dim, 128)).astype(np.float32)
-    return [(v @ proj).tolist() for v in tf_vectors]
+def _cache_key(model_name: str, texts: List[str]) -> str:
+    digest = hashlib.sha256((model_name + "||" + "||".join(texts)).encode("utf-8", errors="ignore")).hexdigest()
+    return digest
 
 
-def _build_vocab(text: str, max_terms: int = 2000) -> List[str]:
-    tokens = re.findall(r"\b\w+\b", text.lower())
-    freq: Dict[str, int] = {}
-    for t in tokens:
-        freq[t] = freq.get(t, 0) + 1
-    # Sort by frequency, take top max_terms
-    return [w for w, _ in sorted(freq.items(), key=lambda x: -x[1])[:max_terms]]
+def _cache_get(key: str) -> Optional[List[List[float]]]:
+    if key in _embed_cache_l1:
+        return _embed_cache_l1[key]
+    path = os.path.join(_cache_dir, key + ".json")
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, list):
+                return data
+        except Exception:
+            return None
+    return None
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+def _cache_set(key: str, vectors: List[List[float]]) -> None:
+    if not vectors:
+        return
+    _embed_cache_l1[key] = vectors
+    path = os.path.join(_cache_dir, key + ".json")
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(vectors, fh)
+    except Exception:
+        pass
+
+
+def _project_vector(vec: np.ndarray, out_dim: int, salt: str) -> np.ndarray:
+    if vec.size == out_dim:
+        return vec
+    rng = np.random.default_rng(abs(hash(salt)) % (2**32))
+    proj = rng.normal(0, 1.0 / np.sqrt(out_dim), size=(vec.size, out_dim)).astype(np.float32)
+    return vec @ proj
+
+
+def _bow_embed_text(text: str, dim: int) -> np.ndarray:
+    vec = np.zeros(dim, dtype=np.float32)
+    for tok in re.findall(r"\b\w+\b", text.lower()):
+        vec[hash(tok) % dim] += 1.0
+    n = np.linalg.norm(vec)
+    return vec / n if n > 0 else vec
+
 
 def _infer_topic(text: str) -> str:
-    """Extract a short topic description from the document's opening."""
-    # Try headings first
     heading = re.search(r"^#{1,3}\s+(.+)$", text, re.MULTILINE)
     if heading:
         return heading.group(1).strip()[:80]
-
-    # Otherwise use the first meaningful sentence
     sentences = re.split(r"(?<=[.!?])\s+", text.strip())
     for s in sentences[:3]:
         clean = s.strip()
         if len(clean.split()) >= 4:
             return clean[:80]
-
     return "the provided content"
 
 
