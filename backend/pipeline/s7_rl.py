@@ -114,6 +114,7 @@ def run_rl_loop(
     doc_profile: Dict[str, Any],
     initial_chunks: List[Dict],
     config: Dict[str, Any],
+    strategy_name: str = "auto",
 ) -> Tuple[List[Dict], List[float], Dict[str, Any]]:
     max_iters = int(config.get("max_iterations", 10))
     model_name = config.get("embedding_model", "all-MiniLM-L6-v2")
@@ -159,7 +160,10 @@ def run_rl_loop(
         trial_cfg = agent.apply_action(action, current_cfg)
         try:
             all_chunks = run_all_chunkers(text, doc_type, trial_cfg)
-            trial_chunks = select_best_strategy(all_chunks, doc_type, trial_cfg)
+            if strategy_name != "auto":
+                trial_chunks = all_chunks.get(strategy_name, [])
+            else:
+                trial_chunks = select_best_strategy(all_chunks, doc_type, trial_cfg)
             if not trial_chunks:
                 reward_history.append(round(best_reward, 4))
                 reward_breakdown.append(best_components)
@@ -194,6 +198,7 @@ def run_rl_loop(
     final_cfg["reward_history_breakdown"] = reward_breakdown
     final_cfg["dqn_action_space"] = {"discrete": len(agent.ACTIONS), "continuous_magnitudes": agent.MAGNITUDES}
     final_cfg["replay_buffer_size"] = len(agent.replay)
+    final_cfg["strategy_name"] = strategy_name
     _save_history(domain, final_cfg, best_components)
     return best_chunks, reward_history, final_cfg
 

@@ -1,7 +1,7 @@
 """
 S3 — Entropy Boundary Refinement
-Supports selectable metrics (JSD, Hellinger, Hybrid), bidirectional multi-layer
-LSTM smoothing, and percentile thresholding.
+Uses Jensen-Shannon Divergence (JSD) as the sole entropy metric, refined by
+a bidirectional multi-layer LSTM smoother and percentile thresholding.
 """
 
 import re
@@ -101,31 +101,25 @@ def refine_boundaries(chunks: List[Dict], config: Dict[str, Any]) -> List[Dict]:
         one.update({"metric_score": 0.0, "jsd_score": 0.0, "hidden_state": 0.0, "boundary_type": "single"})
         return [one]
 
-    metric = str(config.get("entropy_metric", "jsd")).lower()
-    hybrid_lambda = float(config.get("hybrid_lambda", 0.6))
     mode = str(config.get("threshold_mode", "fixed")).lower()
     tau_low = float(config.get("tau_jsd_low", 0.15))
     tau_high = float(config.get("tau_jsd_high", 0.45))
 
     features: List[np.ndarray] = []
-    metric_scores: List[float] = []
     jsd_scores: List[float] = []
     for i in range(len(chunks) - 1):
         a, b = chunks[i]["text"], chunks[i + 1]["text"]
         jsd = _compute_jsd(a, b)
-        hell = _compute_hellinger(a, b)
-        score = _select_metric(metric, jsd, hell, hybrid_lambda)
         overlap = _compute_token_overlap(a, b)
         entropy = _compute_shannon_entropy(a)
-        features.append(np.array([score, entropy, overlap], dtype=np.float32))
-        metric_scores.append(score)
+        features.append(np.array([jsd, entropy, overlap], dtype=np.float32))
         jsd_scores.append(jsd)
 
-    if mode == "percentile" and metric_scores:
+    if mode == "percentile" and jsd_scores:
         low_p = float(config.get("tau_percentile_low", 25))
         high_p = float(config.get("tau_percentile_high", 75))
-        tau_low = float(np.percentile(metric_scores, low_p))
-        tau_high = float(np.percentile(metric_scores, high_p))
+        tau_low = float(np.percentile(jsd_scores, low_p))
+        tau_high = float(np.percentile(jsd_scores, high_p))
 
     memory = BiMultiLayerEntropyMemory(
         input_dim=3,
@@ -141,13 +135,12 @@ def refine_boundaries(chunks: List[Dict], config: Dict[str, Any]) -> List[Dict]:
     while i < len(work):
         curr = dict(work[i])
         if i < len(work) - 1:
-            m = metric_scores[i] if i < len(metric_scores) else 0.0
-            j = jsd_scores[i] if i < len(jsd_scores) else m
+            j = jsd_scores[i] if i < len(jsd_scores) else 0.0
             l = lstm_scores[i] if i < len(lstm_scores) else 0.0
-            signal = 0.55 * m + 0.45 * l
-            curr["metric_score"] = round(m, 4)
+            signal = 0.55 * j + 0.45 * l
+            curr["metric_score"] = round(j, 4)
             curr["jsd_score"] = round(j, 4)
-            curr["entropy_metric"] = metric
+            curr["entropy_metric"] = "jsd"
             curr["hidden_state"] = round(l, 4)
             if signal < tau_low:
                 nxt = work[i + 1]
@@ -161,7 +154,7 @@ def refine_boundaries(chunks: List[Dict], config: Dict[str, Any]) -> List[Dict]:
         else:
             curr["metric_score"] = 0.0
             curr["jsd_score"] = 0.0
-            curr["entropy_metric"] = metric
+            curr["entropy_metric"] = "jsd"
             curr["hidden_state"] = 0.0
             curr["boundary_type"] = "end"
         out.append(curr)
@@ -173,15 +166,7 @@ def refine_boundaries(chunks: List[Dict], config: Dict[str, Any]) -> List[Dict]:
 
 
 def get_jsd_series(chunks: List[Dict]) -> List[float]:
-    return [c.get("metric_score", c.get("jsd_score", 0.0)) for c in chunks]
-
-
-def _select_metric(metric: str, jsd: float, hell: float, lam: float) -> float:
-    if metric == "hellinger":
-        return hell
-    if metric == "hybrid":
-        return float(np.clip(lam * hell + (1.0 - lam) * jsd, 0.0, 1.0))
-    return jsd
+    return [c.get("jsd_score", 0.0) for c in chunks]
 
 
 def _compute_shannon_entropy(text: str) -> float:
@@ -209,13 +194,6 @@ def _compute_jsd(text1: str, text2: str) -> float:
         return 0.5
     m = (p + q) / 2.0
     return float(np.clip(0.5 * _kl(p, m) + 0.5 * _kl(q, m), 0.0, 1.0))
-
-
-def _compute_hellinger(text1: str, text2: str) -> float:
-    p, q = _distribution_pair(text1, text2)
-    if p is None or q is None:
-        return 0.5
-    return float(np.clip(np.linalg.norm(np.sqrt(p) - np.sqrt(q)) / np.sqrt(2), 0.0, 1.0))
 
 
 def _distribution_pair(text1: str, text2: str) -> Tuple[np.ndarray, np.ndarray]:
